@@ -36,7 +36,9 @@ class FootballModel(Model):
             number_of_left_players_agent_controls=11,
             number_of_right_players_agent_controls=0,
             rewards="scoring",
-            render=False
+            render=False,
+            write_full_episode_dumps=True,
+            logdir='.'
         )
 
         self.n_actions = self.env.action_space.nvec[0]
