@@ -272,4 +272,4 @@ def train_agent(episodes=100):
     plot_results(reward_history, agent, GRID_SIZE_X, GRID_SIZE_Y)
 
 if __name__ == "__main__":
-    train_agent(episodes=10)
+    train_agent(episodes=1)

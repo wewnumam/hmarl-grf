@@ -1,9 +1,0 @@
-mesa
-mplsoccer
-matplotlib
-numpy
-gfootball
-pygame
-solara
-torch
-ipykernel
