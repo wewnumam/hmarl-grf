@@ -21,6 +21,6 @@ RUN python3 -m pip install psutil
 COPY . /gfootball
 RUN cd /gfootball && python3 -m pip install .
 
-RUN python3 -m pip install stable_baselines3 gymnasium mplsoccer requests
+RUN python3 -m pip install stable_baselines3 gymnasium mplsoccer requests dataclasses
 
 WORKDIR /gfootball

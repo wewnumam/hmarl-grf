@@ -9,26 +9,30 @@ This repository contains tools and scripts for training multi-agent reinforcemen
 - **NVIDIA Container Toolkit** (for GPU acceleration)
 - **X-Server for Windows** (e.g., [VcXsrv](https://sourceforge.net/projects/vcxsrv/) or [MobaXterm](https://mobaxterm.mobatek.net/)) to view rendering.
 
-### Running in Docker
-In order to build Docker image you have to checkout GFootball git repository first:
+### Setup workflow
+
+1. Clone the Google Research Football repository and enter it:
 
 ```powershell
 git clone https://github.com/google-research/football.git
 cd football
 ```
 
-For rendering the game on macOS and Windows, we recommend installing the game according to the instructions for your platform in README.
+2. Edit the football `requirements.txt` and `setup.py` file so it uses the compatible dependency versions:
 
-#### Configure Docker for Rendering
-In order to see rendered game you need to allow Docker containers access X server:
-
-```powershell
-xhost +"local:docker@"
+```txt
+pygame>=1.9.6
+numpy<1.24
 ```
 
-This command has to be executed after each reboot. Alternatively you can add this command to /etc/profile to not worry about it in the future.
+3. Override the football Dockerfile with the one from this repository:
 
-#### Build Docker image
+```powershell
+Copy-Item ..\hmarl-grf\Dockerfile .\Dockerfile -Force
+```
+
+4. Build the Docker image from the football repository:
+
 Tensorflow without GPU-training support version
 
 ```powershell
@@ -41,39 +45,26 @@ Tensorflow with GPU-training support version
 docker build --build-arg DOCKER_BASE=tensorflow/tensorflow:1.15.2-gpu-py3 . -t gfootball
 ```
 
-### Building the Image
-
-Build the Docker image locally:
+5. Start the container from this repository with Docker Compose:
 
 ```powershell
-docker build -t gfootball .
+docker compose up -d
 ```
 
-### Running the Container
-
-To run the project with live file synchronization (so changes on your host reflect inside the container):
-
-**PowerShell:**
+6. Open a shell inside the running container:
 
 ```powershell
-docker run --gpus all `
-  -e DISPLAY=host.docker.internal:0.0 `
-  -it `
-  -v ${PWD}:/gfootball `
-  -v /tmp/.X11-unix:/tmp/.X11-unix:rw `
-  gfootball bash
+docker exec -it gfootball-dev bash
 ```
 
-**Linux/WSL:**
+### Rendering
+For rendering the game on Windows, ensure your X-Server is running and that Docker has access to the display. If needed, allow Docker containers to connect to the host display:
 
-```bash
-docker run --gpus all \
-  -e DISPLAY=$DISPLAY \
-  -it \
-  -v $(pwd):/gfootball \
-  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  gfootball bash
+```powershell
+xhost +"local:docker@"
 ```
+
+This command has to be executed after each reboot. Alternatively, add it to your shell profile to avoid repeating it.
 
 ## 📂 Project Structure
 
@@ -96,6 +87,24 @@ python3 11v11_a2c.py
 
 # Run random action baseline
 python3 11v11_random_action.py
+```
+
+### Convert a dump file to text
+Use the replay dump converter to turn a GRF dump into a readable text trace:
+
+```bash
+python3 dumps/dump_to_txt.py \
+  --trace_file=/gfootball/dumps/episode_done_20260625-033933885202.dump \
+  --output=/gfootball/dumps/output.txt
+```
+
+### Plot average team positions
+Generate a pitch plot from a dump file:
+
+```bash
+python3 evaluation/average_position.py \
+  /gfootball/dumps/output.txt \
+  /gfootball/dumps/average_position.png
 ```
 
 ### Rendering

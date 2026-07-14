@@ -1,6 +1,6 @@
 import gfootball.env as football_env
 import numpy as np
-import gymnasium as gym
+import gym
 from stable_baselines3 import PPO
 from typing import Any, Dict, List, Tuple
 
@@ -12,16 +12,15 @@ LOG_DIR = "dumps"
 
 class FootballGymEnv(gym.Env):
     """
-    A Gymnasium-compatible wrapper for the Google Research Football environment.
-    This wrapper adapts the multi-agent GRF environment to a single-policy interface 
-    suitable for Stable Baselines 3, enabling training with PPO.
+    A Gym-compatible wrapper for the Google Research Football environment.
+    Adapted for older gym/Stable Baselines 3 API (Python 3.6 compatibility).
     """
     def __init__(self, env_name: str = ENV_NAME, num_agents: int = NUM_AGENTS, render: bool = False):
         super().__init__()
         self.num_agents = num_agents
         
         # Create GRF environment
-        env = football_env.create_environment(
+        self.env = football_env.create_environment(
             env_name=env_name,
             representation="simple115v2",
             number_of_left_players_agent_controls=num_agents,
@@ -30,7 +29,6 @@ class FootballGymEnv(gym.Env):
             write_full_episode_dumps=True,
             render=render
         )
-        self.env = self._patch_grf_env(env)
         
         # Action space: 11 agents
         self.action_space = gym.spaces.MultiDiscrete([ACTION_SPACE_SIZE] * num_agents)
@@ -43,64 +41,37 @@ class FootballGymEnv(gym.Env):
             dtype=np.float32
         )
 
-    def _patch_grf_env(self, env: Any) -> Any:
-        """Recursively patches GRF environment hierarchy for Gymnasium compatibility."""
-        import types
-
-        def patch_single_env(e):
-            if hasattr(e, '_is_patched'):
-                return
-            
-            orig_reset = e.reset
-            orig_step = e.step
-
-            def reset_wrapper(self_env, *args, **kwargs) -> Tuple[Any, Dict[str, Any]]:
-                try:
-                    result = orig_reset(*args, **kwargs)
-                except (TypeError, ValueError):
-                    result = orig_reset()
-                
-                if isinstance(result, tuple) and len(result) == 2:
-                    return result
-                return result, {}
-
-            def step_wrapper(self_env, *args, **kwargs) -> Tuple[Any, float, bool, bool, Dict[str, Any]]:
-                result = orig_step(*args, **kwargs)
-                if isinstance(result, tuple) and len(result) == 4:
-                    obs, reward, done, info = result
-                    return obs, reward, done, False, info
-                return result
-
-            e.reset = types.MethodType(reset_wrapper, e)
-            e.step = types.MethodType(step_wrapper, e)
-            e._is_patched = True
-
-        curr = env
-        while curr is not None:
-            patch_single_env(curr)
-            if hasattr(curr, 'env'):
-                curr = curr.env
-            else:
-                break
-        return env
-
-    def reset(self, seed: int = None, options: Dict[str, Any] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def reset(self) -> np.ndarray:
         """Resets the environment to an initial state."""
-        super().reset(seed=seed)
-        obs, info = self.env.reset()
-        return np.array(obs, dtype=np.float32), info
+        obs = self.env.reset()
 
-    def step(self, actions: Any) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        # Ensure we only return the observation, not a tuple
+        if isinstance(obs, tuple):
+            obs = obs[0]
+
+        return np.array(obs, dtype=np.float32)
+
+    def step(self, actions: Any) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         """Executes one timestep in the environment."""
         if isinstance(actions, np.ndarray):
             actions = actions.tolist()
             
-        obs, reward, terminated, truncated, info = self.env.step(actions)
+        result = self.env.step(actions)
+        
+        # Safely unpack based on what GRF returns, converting to 4-tuple API
+        if len(result) == 4:
+            obs, reward, done, info = result
+        elif len(result) == 5:
+            obs, reward, terminated, truncated, info = result
+            done = terminated or truncated
+        else:
+            raise ValueError(f"Unexpected return from step: {len(result)} items")
         
         obs = np.array(obs, dtype=np.float32)
         team_reward = float(np.sum(reward))
         
-        return obs, team_reward, terminated, truncated, info
+        # Return exactly 4 items expected by older Stable Baselines 3
+        return obs, team_reward, done, info
 
     def render(self):
         """Renders the environment."""
@@ -146,21 +117,21 @@ class SoccerMatchPPO:
     def run(self, max_steps: int = 3000):
         """Evaluates the trained model in the environment."""
         print("Starting match evaluation...")
-        obs, _ = self.env.reset()
-        
+        obs = self.env.reset()
+
         try:
             for step in range(max_steps):
                 # Predict action using the trained model
                 action, _states = self.model.predict(obs, deterministic=True)
-                
-                obs, reward, terminated, truncated, info = self.env.step(action)
-                
+
+                obs, reward, done, info = self.env.step(action)
+
                 if reward != 0:
                     print(f"Step {step:4d} | Team Reward: {reward}")
-                
-                if terminated or truncated:
+
+                if done:
                     print(f"Match ended after {step} steps.")
-                    obs, _ = self.env.reset()
+                    obs = self.env.reset()
                     break
         except KeyboardInterrupt:
             print("\nEvaluation interrupted by user.")
@@ -172,7 +143,7 @@ if __name__ == "__main__":
     match = SoccerMatchPPO(render=False)
     
     # Run training (25,000 steps as in baseline3_ppo.py)
-    match.train(total_timesteps=12000)
+    match.train(total_timesteps=3000)
     
     # Run a demonstration
     match.run(max_steps=3000)
