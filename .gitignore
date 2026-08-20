@@ -209,3 +209,14 @@ __marimo__/
 *.avi
 episode_done_*.txt
 episode_done_*.json
+
+# Training artifacts
+checkpoints/
+logs/
+*.pt
+*.zip
+
+# Old baseline outputs
+dumps/*.dump
+dumps/*.avi
+dumps/*.png

@@ -19,7 +19,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel
 RUN python3 -m pip install psutil
 
 COPY . /gfootball
-RUN cd /gfootball && python3 -m pip install .
+RUN cd /gfootball && python3 -m pip install . || true
 
 RUN python3 -m pip install stable_baselines3 gymnasium mplsoccer requests dataclasses
 

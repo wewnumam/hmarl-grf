@@ -1,120 +1,154 @@
-# HMARL-GRF: Hybrid Multi-Agent Reinforcement Learning for Google Research Football
+# HMARL-GRF
 
-This repository contains tools and scripts for training multi-agent reinforcement learning models in the [Google Research Football (GRF)](https://github.com/google-research/football) environment. It focuses on 11v11 scenarios using algorithms like PPO and A2C via Stable Baselines3.
+Hierarchical Multi-Agent Reinforcement Learning untuk Google Research Football.
 
-## 🚀 Quick Start
+Implementasi arsitektur hierarkis 3-level sesuai tesis:
+- **High-Level** (rule-based) → strategi makro (pressing, counter-attack, possession)
+- **Mid-Level** (rule-based) → sub-goal per agen (press, mark, hold)
+- **Low-Level** (PPO) → aksi per agen
 
-### Prerequisites
-- **Docker Desktop** (with WSL2 backend recommended)
-- **NVIDIA Container Toolkit** (for GPU acceleration)
-- **X-Server for Windows** (e.g., [VcXsrv](https://sourceforge.net/projects/vcxsrv/) or [MobaXterm](https://mobaxterm.mobatek.net/)) to view rendering.
+## Struktur
 
-### Setup workflow
-
-1. Clone the Google Research Football repository and enter it:
-
-```powershell
-git clone https://github.com/google-research/football.git
-cd football
+```
+hmarl-grf/
+├── hmarl/                    # Package utama
+│   ├── __init__.py
+│   ├── env.py                # GRF env wrapper, state extraction
+│   ├── policy.py             # Jaringan hierarkis (High/Mid/Low)
+│   ├── expert.py             # Policy ahli rule-based (referensi RCI)
+│   ├── reward.py             # Reward shaping (FAI, PPR, RCI)
+│   ├── rci.py                # Role Coherence Index
+│   ├── metrics.py            # Metrik evaluasi
+│   └── ippo.py               # Baseline Independent PPO
+├── scripts/
+│   ├── train.py              # Training HMARL
+│   └── eval.py               # Evaluasi lengkap
+├── evaluation/               # Utilitas analisis (kerja sebelumnya)
+│   ├── average_position.py
+│   ├── coordination_metrics.py
+│   └── baselines/            # Baseline lama (A2C, PPO, Random)
+├── Dockerfile
+├── docker-compose.yml
+├── setup.py
+└── README.md
 ```
 
-2. Edit the football `requirements.txt` and `setup.py` file so it uses the compatible dependency versions:
+## Setup
 
-```txt
-pygame>=1.9.6
-numpy<1.24
-```
-
-3. Override the football Dockerfile with the one from this repository:
-
-```powershell
-Copy-Item ..\hmarl-grf\Dockerfile .\Dockerfile -Force
-```
-
-4. Build the Docker image from the football repository:
-
-Tensorflow without GPU-training support version
-
-```powershell
-docker build --build-arg DOCKER_BASE=ubuntu:20.04 . -t gfootball
-```
-
-Tensorflow with GPU-training support version
-
-```powershell
-docker build --build-arg DOCKER_BASE=tensorflow/tensorflow:1.15.2-gpu-py3 . -t gfootball
-```
-
-5. Start the container from this repository with Docker Compose:
-
-```powershell
+```bash
 docker compose up -d
-```
-
-6. Open a shell inside the running container:
-
-```powershell
 docker exec -it gfootball-dev bash
 ```
 
-### Rendering
-For rendering the game on Windows, ensure your X-Server is running and that Docker has access to the display. If needed, allow Docker containers to connect to the host display:
+Working directory di dalam container: `/gfootball` (volume-mounted dari host).
 
-```powershell
-xhost +"local:docker@"
-```
-
-This command has to be executed after each reboot. Alternatively, add it to your shell profile to avoid repeating it.
-
-## 📂 Project Structure
-
-- `11v11_ppo.py`: Training script using the Proximal Policy Optimization (PPO) algorithm.
-- `11v11_a2c.py`: Training script using the Advantage Actor-Critic (A2C) algorithm.
-- `11v11_random_action.py`: A baseline script that executes random actions for all 11 agents.
-- `Dockerfile`: Container configuration with all necessary dependencies (Ubuntu 22.04, Python 3.10, GRF, etc.).
-- `dumps/`: Directory where environment logs and episode replays are saved.
-
-## 🛠️ Usage
-
-Once inside the container, you can start training by running any of the scripts:
+## Training
 
 ```bash
-# Train using PPO
-python3 11v11_ppo.py
+# Train HMARL
+python3 scripts/train.py \
+    --timesteps 50000 \
+    --eval-freq 5000 \
+    --log-dir logs/ \
+    --model-dir checkpoints/
 
-# Train using A2C
-python3 11v11_a2c.py
+# Resume dari checkpoint
+python3 scripts/train.py --resume checkpoints/hmarl_model.pt
 
-# Run random action baseline
-python3 11v11_random_action.py
+# Train IPPO baseline
+python3 hmarl/ippo.py --timesteps 50000 --log-dir dumps/
 ```
 
-### Convert a dump file to text
-Use the replay dump converter to turn a GRF dump into a readable text trace:
+> **Catatan:** Training GRF 11v11 lambat (~58 steps/s raw, lebih lambat dengan hierarki). Satu episode penuh butuh ~5-10 menit. Gunakan `--timesteps` kecil untuk testing, misal `100` atau `300`.
+
+## Evaluasi
 
 ```bash
-python3 dumps/dump_to_txt.py \
-  --trace_file=/gfootball/dumps/episode_done_20260625-033933885202.dump \
-  --output=/gfootball/dumps/output.txt
+# Evaluasi model HMARL
+python3 scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --episodes 10
+
+# Evaluasi dengan baseline random
+python3 scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --episodes 10 --baseline random
+
+# Evaluasi semua baseline
+python3 scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --episodes 10 --baseline all
 ```
 
-### Plot average team positions
-Generate a pitch plot from a dump file:
+> **Catatan:** Satu episode evaluasi butuh ~5-10 menit (3000 GRF steps + inferensi hierarki). Gunakan `--episodes` kecil untuk testing.
 
-```bash
-python3 evaluation/average_position.py \
-  /gfootball/dumps/output.txt \
-  /gfootball/dumps/average_position.png
+### Output Evaluasi
+
+File JSON disimpan di `evaluation_results/`:
+- `hmarl_results.json` — Metrik HMARL
+- `hmarl_episodes.json` — Detail per episode
+
+Contoh output:
+```
+============================================================
+  Evaluation Results: HMARL
+============================================================
+
+  --- Performance Metrics ---
+  Win Rate:              0.0%
+  Goal Difference:       0
+  Goals For / Against:   0 / 0
+  Cumulative Reward:     -48.96
+
+  --- Coordination Metrics ---
+  PSR:                   25.00% (10/40)
+  PPR:                   0.00% (0/10)
+  Positional Entropy:    2.1499 bits
+  Team Compactness:      15.2605 ± 5.0603
+  FAI:                   0.7183 ± 0.0593
+
+  --- Role Coherence Index ---
+  RCI_strict:            0.0053
+  RCI_cat:               0.8860
+============================================================
 ```
 
-### Rendering
-If you set `render=True` in the scripts, ensure your X-Server is running on the host and "Disable access control" is checked to allow the container to connect to your display.
+## Argumen
 
-## 📝 Environment Details
-- **Scenario**: `11_vs_11_stochastic`
-- **Representation**: `simple115v2`
-- **Agents**: 11 agents controlled on the left team.
-- **Action Space**: MultiDiscrete (19 actions per agent).
+| Script | Argumen | Default | Keterangan |
+|--------|---------|---------|------------|
+| `train.py` | `--timesteps` | 3000 | Jumlah timestep training |
+| | `--eval-freq` | 5000 | Frekuensi evaluasi |
+| | `--log-dir` | `logs/` | Direktori log TensorBoard |
+| | `--model-dir` | `checkpoints/` | Direktori simpan model |
+| | `--resume` | - | Path checkpoint untuk lanjutkan |
+| | `--render` | off | Tampilkan rendering |
+| `eval.py` | `--checkpoint` | **required** | Path model `.pt` |
+| | `--episodes` | 100 | Jumlah episode evaluasi |
+| | `--output-dir` | `evaluation_results` | Direktori output |
+| | `--baseline` | - | `random` atau `all` |
+| | `--render` | off | Tampilkan rendering |
+| `ippo.py` | `--timesteps` | 3000 | Jumlah timestep training |
+| | `--log-dir` | `dumps/` | Direktori log |
+| | `--render` | off | Tampilkan rendering |
 
-## 📄 License
-This project is part of a thesis repository. Please refer to the specific license terms if applicable.
+## Metrik
+
+| Metrik | Keterangan | Referensi |
+|--------|------------|-----------|
+| WR | Win Rate | BAB 4 |
+| GD | Goal Difference | BAB 4 |
+| PSR | Pass Success Ratio | BAB 3 |
+| PPR | Pass Progression Ratio | BAB 3 |
+| FAI | Formation Adherence Index | BAB 3 |
+| H | Positional Entropy (bits) | BAB 3 |
+| TC | Team Compactness | BAB 3 |
+| RCI_strict | Role Coherence Index (exact match) | BAB 3 — metrik novel |
+| RCI_cat | Role Coherence Index (category match) | BAB 3 — metrik novel |
+
+## Dependensi
+
+- Python 3.6+
+- PyTorch (CUDA)
+- NumPy
+- Google Research Football (via Docker)
+- TensorBoard (opsional)
+
+## Referensi
+
+Tesis: *Hierarchical Multi-Agent Reinforcement Learning untuk Koordinasi Taktik dalam Google Research Football*
+Universitas Gadjah Mada, 2026.
