@@ -30,22 +30,6 @@ ALPHA_HIGH = 0.01
 ALPHA_MID = 0.01
 ALPHA_LOW = 0.01
 
-# Formation target positions (GRF coordinates, normalized -1..1)
-# 4-3-3 ideal positions
-FORMATION_TARGETS_433 = {
-    ROLE_GK: [-0.95, 0.0],
-    ROLE_CB: [-0.5, -0.15],
-    ROLE_CB: [-0.5, 0.15],  # Second CB
-    ROLE_LB: [-0.3, -0.35],
-    ROLE_RB: [-0.3, 0.35],
-    ROLE_DM: [-0.1, 0.0],
-    ROLE_CM: [0.1, -0.2],
-    ROLE_CM: [0.1, 0.2],  # Second CM
-    ROLE_LM: [0.3, -0.35],
-    ROLE_RM: [0.3, 0.35],
-    ROLE_CF: [0.5, 0.0],
-}
-
 # Maximum possible deviation (diagonal of the pitch)
 D_MAX = 2.24  # sqrt(2^2 + 1.2^2) ≈ 2.33, use 2.24 as practical max
 

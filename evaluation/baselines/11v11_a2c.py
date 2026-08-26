@@ -27,7 +27,7 @@ class FootballGymEnv(gym.Env):
             number_of_left_players_agent_controls=num_agents,
             stacked=False,
             logdir=LOG_DIR,
-            write_full_episode_dumps=True,
+            write_full_episode_dumps=False,
             render=render
         )
         self.env = self._patch_grf_env(env)

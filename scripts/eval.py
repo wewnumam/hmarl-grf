@@ -34,8 +34,18 @@ from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
 from hmarl.metrics import (
     compute_all_metrics, print_metrics,
     compute_win_rate, compute_goal_difference,
+    team_compactness,
 )
 from hmarl.rci import compute_rci
+from evaluation.visualizations import (
+    plot_role_heatmap,
+    plot_formation_snapshot,
+    plot_action_distribution,
+    plot_macro_strategy_timeline,
+    plot_compactness_over_time,
+    plot_comparative_bars,
+    plot_metric_correlation,
+)
 
 
 OBS_DIM = 115
@@ -153,6 +163,12 @@ def evaluate_hmarl(
     all_ideal_actions_flat = []
     all_game_states_flat = []
 
+    # Per-timestep data for visualizations
+    all_strategies = []
+    all_sub_goals = []
+    all_compactness_ts = []
+    all_roles = None
+
     print(f"\nEvaluating HMARL over {num_episodes} episodes...")
     print(f"{'='*60}")
 
@@ -176,6 +192,27 @@ def evaluate_hmarl(
             macro = controller.get_macro_strategy(game_state)
             sub_goals = controller.get_sub_goals(game_state, macro)
             ideal_actions = expert.get_ideal_actions(game_state, sub_goals, macro)
+
+            # Track strategies and sub-goals for visualization
+            all_strategies.append(macro)
+            all_sub_goals.append(list(sub_goals))
+            if all_roles is None:
+                roles_raw = game_state.get('left_team_roles', list(range(11)))
+                all_roles = [int(r) for r in roles_raw[:11]]
+
+            # Track compactness per timestep
+            if ep == 0:  # Only first episode for per-timestep plots
+                tc_key = 'left_team'
+                tc_positions = game_state.get(tc_key, [])
+                if len(tc_positions) >= 11:
+                    pos_arr = np.array(tc_positions[:11])
+                    scaled = np.column_stack([
+                        (pos_arr[:, 0] + 1.0) * 60.0,
+                        (pos_arr[:, 1] + 0.42) * (80.0 / 0.84),
+                    ])
+                    centroid = scaled.mean(axis=0)
+                    rho = float(np.sqrt(np.mean(np.sum((scaled - centroid)**2, axis=1))))
+                    all_compactness_ts.append(rho)
 
             joint_actions = []
             for i in range(NUM_AGENTS):
@@ -297,6 +334,49 @@ def evaluate_hmarl(
     ep_path = os.path.join(output_dir, "hmarl_episodes.json")
     with open(ep_path, 'w') as f:
         json.dump(episode_data, f, indent=2)
+
+    # --- Generate visualizations ---
+    plots_dir = os.path.join(output_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    try:
+        print(f"\nGenerating visualizations...")
+        # Role heatmap
+        if all_game_states_flat:
+            plot_role_heatmap(
+                all_game_states_flat[:3000],  # Cap at ~1 episode for speed
+                os.path.join(plots_dir, "04_role_heatmap.png"),
+            )
+            # Formation snapshots (start, mid, late)
+            for ts, label in [(0, 'start'), (min(1500, len(all_game_states_flat)//2), 'mid'),
+                              (min(2999, len(all_game_states_flat)-1), 'late')]:
+                plot_formation_snapshot(
+                    all_game_states_flat,
+                    os.path.join(plots_dir, f"05_formation_{label}.png"),
+                    timestep=ts,
+                    title=f"Formation Snapshot ({label})",
+                )
+        # Action distribution
+        if all_actual_actions_flat and all_roles:
+            plot_action_distribution(
+                all_actual_actions_flat[:3000],
+                all_roles,
+                os.path.join(plots_dir, "06_action_distribution.png"),
+            )
+        # Strategy timeline
+        if all_strategies:
+            plot_macro_strategy_timeline(
+                all_strategies[:3000],
+                os.path.join(plots_dir, "07_strategy_timeline.png"),
+            )
+        # Compactness over time
+        if all_compactness_ts:
+            plot_compactness_over_time(
+                {'HMARL': all_compactness_ts},
+                os.path.join(plots_dir, "08_compactness.png"),
+            )
+        print(f"Visualizations saved to {plots_dir}")
+    except Exception as e:
+        print(f"Warning: Visualization generation failed: {e}")
 
     env.close()
     return metrics

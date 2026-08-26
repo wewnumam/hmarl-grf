@@ -70,6 +70,8 @@ LOG_FREQ = 1_000
 SAVE_FREQ = 50_000
 EPISODE_MAX_STEPS = 3000  # GRF half = 3000 timesteps
 NUM_EVAL_EPISODES = 100
+DUMP_FREQ = 500          # Enable dump every N episodes
+MAX_DUMPS = 10            # Keep at most N dump files
 
 HIDDEN_DIM = 256
 HEAD_DIM = 128
@@ -79,6 +81,16 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 LOG_DIR = "dumps"
 MODEL_DIR = "checkpoints"
+
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +220,7 @@ class HMARLTrainer:
         os.makedirs(model_dir, exist_ok=True)
 
         # Create environment (use raw for full game state access)
-        self.env = create_raw_env(render=render)
+        self.env = create_raw_env(render=render, write_dumps=False)
 
         # Hierarchical controller (rule-based high/mid)
         self.controller = HierarchicalController()
@@ -501,19 +513,104 @@ class HMARLTrainer:
             self.writer.add_scalar('loss/value', total_v_loss / num_updates, self.global_step)
             self.writer.add_scalar('loss/entropy', total_entropy / num_updates, self.global_step)
 
+    def _init_training_log(self):
+        """Initialize per-episode training log for visualizations."""
+        self._train_log = {
+            'episode_rewards': [],
+            'episode_rci_cat': [],
+            'episode_rci_strict': [],
+            'episode_fai': [],
+            'episode_ppr': [],
+            'episode_compactness': [],
+            'episode_goals_for': [],
+            'episode_goals_against': [],
+        }
+
+    def _append_training_log(self, stats: Dict):
+        """Append per-episode metrics to training log."""
+        self._train_log['episode_rewards'].append(float(stats['episode_reward']))
+        self._train_log['episode_goals_for'].append(int(stats['score_left']))
+        self._train_log['episode_goals_against'].append(int(stats['score_right']))
+
+        # Compute per-episode RCI
+        actual = stats.get('all_actual_actions', [])
+        ideal = stats.get('all_ideal_actions', [])
+        if actual and ideal:
+            from hmarl.rci import compute_rci
+            rci_res = compute_rci(actual, ideal)
+            self._train_log['episode_rci_cat'].append(rci_res['rci_cat'])
+            self._train_log['episode_rci_strict'].append(rci_res['rci_strict'])
+        else:
+            self._train_log['episode_rci_cat'].append(0.0)
+            self._train_log['episode_rci_strict'].append(0.0)
+
+        # Compute per-episode FAI, PPR, compactness from game states
+        game_states = stats.get('all_game_states', [])
+        if game_states:
+            fai_mean, _ = formation_adherence_index(game_states)
+            ppr_stats = 0.0
+            if stats.get('all_actual_actions'):
+                _, _, ppr_val = progressive_pass_ratio(
+                    stats.get('all_actual_actions', []), game_states,
+                )
+                ppr_stats = ppr_val
+            tc_mean, _, _, _ = team_compactness(game_states)
+            self._train_log['episode_fai'].append(fai_mean)
+            self._train_log['episode_ppr'].append(ppr_stats if isinstance(ppr_stats, float) else 0.0)
+            self._train_log['episode_compactness'].append(tc_mean)
+        else:
+            self._train_log['episode_fai'].append(0.0)
+            self._train_log['episode_ppr'].append(0.0)
+            self._train_log['episode_compactness'].append(0.0)
+
+    def _save_training_log(self):
+        """Save training log to JSON for visualization."""
+        import json as _json
+        path = os.path.join(self.log_dir, 'training_log.json')
+        # Convert numpy types
+        serializable = {}
+        for k, v in self._train_log.items():
+            if isinstance(v, list):
+                serializable[k] = [float(x) if hasattr(x, 'item') else x for x in v]
+            else:
+                serializable[k] = v
+        with open(path, 'w') as f:
+            _json.dump(serializable, f, indent=2)
+        print(f"Training log saved: {path}")
+
     def train(self):
         """Main training loop."""
         print(f"HMARL Training | Device: {DEVICE}")
         print(f"Total timesteps: {self.total_timesteps:,}")
         print(f"Log dir: {self.log_dir}")
+        print(f"Dump every {DUMP_FREQ} episodes (max {MAX_DUMPS} kept)")
         print(f"{'='*60}")
 
         start_time = time.time()
         episode_rewards = []
+        self._init_training_log()
 
         while self.global_step < self.total_timesteps:
+            # --- Selective dump: recreate env with dumps at interval ---
+            dump_this_episode = (
+                DUMP_FREQ > 0
+                and self.episode_count % DUMP_FREQ == 0
+                and self.episode_count > 0
+            )
+            if dump_this_episode:
+                self.env.close()
+                self.env = create_raw_env(render=self.render, write_dumps=True)
+                print(f"  [DUMP] Episode {self.episode_count} — dumps enabled")
+
             stats = self.run_episode(training=True)
+
+            if dump_this_episode:
+                self.env.close()
+                self.env = create_raw_env(render=self.render, write_dumps=False)
+                self._cleanup_dumps()
+
             episode_rewards.append(stats['episode_reward'])
+            self._append_training_log(stats)
 
             # Logging
             if self.episode_count % LOG_FREQ == 0 and self.episode_count > 0:
@@ -533,11 +630,24 @@ class HMARLTrainer:
                 self.writer.add_scalar('reward/avg_100', avg_reward, self.episode_count)
                 self.writer.add_scalar('training/episode_length', stats['episode_length'], self.episode_count)
 
-            # Save checkpoint
+            # Save checkpoint + mid-training eval
             if self.episode_count % SAVE_FREQ == 0 and self.episode_count > 0:
                 self._save_checkpoint()
+                self._save_training_log()
+
+                # Mid-training evaluation
+                eval_stats = self._quick_eval(num_episodes=10)
+                self.writer.add_scalar('eval/win_rate', eval_stats['win_rate'], self.episode_count)
+                self.writer.add_scalar('eval/avg_reward', eval_stats['avg_reward'], self.episode_count)
+                self.writer.add_scalar('eval/goal_diff', eval_stats['goal_diff'], self.episode_count)
+                print(
+                    f"  [EVAL] WR: {eval_stats['win_rate']:.1f}% | "
+                    f"Avg Reward: {eval_stats['avg_reward']:.2f} | "
+                    f"GD: {eval_stats['goal_diff']}"
+                )
 
         self._save_checkpoint()
+        self._save_training_log()
         self.writer.close()
         print(f"\nTraining complete. Total time: {time.time() - start_time:.1f}s")
 
@@ -564,6 +674,19 @@ class HMARLTrainer:
         }, path)
         print(f"Checkpoint saved: {path}")
 
+    def _cleanup_dumps(self):
+        """Remove old dump files, keep only the most recent MAX_DUMPS."""
+        import glob
+        dump_files = sorted(
+            glob.glob(os.path.join(self.log_dir, "*.dump")),
+            key=os.path.getmtime,
+        )
+        if len(dump_files) > MAX_DUMPS:
+            for f in dump_files[: len(dump_files) - MAX_DUMPS]:
+                os.remove(f)
+            print(f"  [DUMP] Cleaned up {len(dump_files) - MAX_DUMPS} old dumps ({len(dump_files)} → {MAX_DUMPS})")
+
+
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
         checkpoint = torch.load(path, map_location='cpu')
@@ -573,6 +696,73 @@ class HMARLTrainer:
         self.global_step = checkpoint['global_step']
         self.episode_count = checkpoint['episode_count']
         print(f"Checkpoint loaded: {path} (step {self.global_step})")
+
+    def _quick_eval(self, num_episodes: int = 10) -> Dict:
+        """Run quick evaluation during training. Returns eval metrics."""
+        self.policy.eval()
+        self.subgoal_embedding.eval()
+
+        eval_env = create_raw_env(render=False)
+        controller = HierarchicalController()
+        expert = ExpertPolicyAllAgents()
+
+        wins = 0
+        total_goals_for = 0
+        total_goals_against = 0
+        total_reward = 0.0
+
+        for _ in range(num_episodes):
+            reset_result = eval_env.reset()
+            obs_raw = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+            game_state = extract_game_state(obs_raw)
+            ep_reward = 0.0
+            done = False
+            step = 0
+
+            while not done and step < EPISODE_MAX_STEPS:
+                macro = controller.get_macro_strategy(game_state)
+                sub_goals = controller.get_sub_goals(game_state, macro)
+
+                joint_actions = []
+                for i in range(NUM_AGENTS):
+                    obs_vec = self._get_obs_vector(game_state, i)
+                    with torch.no_grad():
+                        sg_embed = self.subgoal_embedding(
+                            torch.LongTensor([sub_goals[i]]).to(DEVICE)
+                        ).cpu().numpy().flatten()
+                        obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
+                        sg_t = torch.FloatTensor(sg_embed).unsqueeze(0).to(DEVICE)
+                        logits, _ = self.policy(obs_t, sg_t)
+                        joint_actions.append(logits.argmax(dim=-1).item())
+
+                step_result = eval_env.step(joint_actions)
+                if len(step_result) == 5:
+                    obs_raw, reward, terminated, truncated, info = step_result
+                    done = terminated or truncated
+                else:
+                    obs_raw, reward, done, info = step_result
+                ep_reward += float(np.sum(reward))
+                game_state = extract_game_state(obs_raw)
+                step += 1
+
+            score = info.get('score', [0, 0])
+            gf, ga = score[0], score[1] if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
+            if gf > ga:
+                wins += 1
+            total_goals_for += gf
+            total_goals_against += ga
+            total_reward += ep_reward
+
+        eval_env.close()
+        self.policy.train()
+        self.subgoal_embedding.train()
+
+        return {
+            'win_rate': (wins / num_episodes * 100.0),
+            'avg_reward': total_reward / num_episodes,
+            'goal_diff': total_goals_for - total_goals_against,
+            'num_episodes': num_episodes,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -592,8 +782,18 @@ if __name__ == "__main__":
                         help="Resume from checkpoint")
     parser.add_argument("--log-dir", type=str, default=LOG_DIR)
     parser.add_argument("--model-dir", type=str, default=MODEL_DIR)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
+    parser.add_argument("--dump-freq", type=int, default=DUMP_FREQ,
+                        help="Enable dump every N episodes (0=never)")
+    parser.add_argument("--max-dumps", type=int, default=MAX_DUMPS,
+                        help="Max dump files to keep")
 
     args = parser.parse_args()
+    DUMP_FREQ = args.dump_freq
+    MAX_DUMPS = args.max_dumps
+
+    set_seed(args.seed)
 
     trainer = HMARLTrainer(
         total_timesteps=args.timesteps,

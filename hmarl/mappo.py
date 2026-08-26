@@ -1,14 +1,21 @@
-"""Independent PPO (IPPO) Baseline.
+"""Multi-Agent PPO (MAPPO) Baseline.
 
-Each of the 11 agents is trained independently with its own PPO policy.
-No hierarchical structure - flat policy from observation to action.
-Used as comparison baseline per thesis BAB_4.
+Decentralized actors + centralized critic.
+
+Architecture:
+  Actor (shared across agents): 115-dim local obs -> action
+  Critic (centralized):         1265-dim (11 × 115) concatenated obs -> value
+
+Key difference from IPPO/SHPPO:
+  IPPO/SHPPO: critic sees only one agent's local observation
+  MAPPO:      critic sees ALL agents' observations (global state)
+
+Reference: Yu et al. (2022) - The Surprising Effectiveness of PPO in
+Cooperative Multi-Agent Games
 
 Note: Baselines use game reward only (no FAI/PPR/RCI reward shaping).
 This ensures a fair comparison — HMARL's improvement over baselines
 is attributed to the hierarchical architecture, not reward shaping.
-
-Reference: Song et al. (2024) - An Empirical Study on Google Research Football
 """
 
 import os
@@ -25,6 +32,7 @@ from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 OBS_DIM = 115
 HIDDEN_DIM = 256
 ACTION_SPACE_SIZE = 19
+CENTRALIZED_OBS_DIM = OBS_DIM * NUM_AGENTS  # 115 * 11 = 1265
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_RANGE = 0.2
@@ -49,61 +57,89 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-class FlatActorCritic(nn.Module):
-    """Flat Actor-Critic (no hierarchy). MLP with shared layers."""
+class DecentralizedActor(nn.Module):
+    """Per-agent actor network (shared weights across agents).
 
-    def __init__(self, obs_dim: int = OBS_DIM, action_dim: int = ACTION_SPACE_SIZE, hidden: int = HIDDEN_DIM):
+    Input: 115-dim local observation
+    Output: action logits (19 actions)
+    """
+
+    def __init__(self, obs_dim: int = OBS_DIM, action_dim: int = ACTION_SPACE_SIZE,
+                 hidden: int = HIDDEN_DIM):
         super().__init__()
-        self.shared = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-        )
-        self.policy_head = nn.Sequential(
-            nn.Linear(hidden, 128),
-            nn.ReLU(),
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 128), nn.ReLU(),
             nn.Linear(128, action_dim),
-        )
-        self.value_head = nn.Sequential(
-            nn.Linear(hidden, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1),
         )
 
     def forward(self, obs):
-        x = self.shared(obs)
-        return self.policy_head(x), self.value_head(x)
+        return self.net(obs)
 
     def get_action_and_value(self, obs, action=None):
-        logits, value = self.forward(obs)
+        logits = self.forward(obs)
         dist = torch.distributions.Categorical(logits=logits)
         if action is None:
             action = dist.sample()
-        return action, dist.log_prob(action), dist.entropy(), value.squeeze(-1)
+        return action, dist.log_prob(action), dist.entropy()
 
 
-class IPPORolloutBuffer:
-    """Per-agent rollout buffer for IPPO."""
+class CentralizedCritic(nn.Module):
+    """Centralized critic — sees concatenated observations of ALL agents.
+
+    Input: 1265-dim = concat(obs_0, obs_1, ..., obs_10)
+    Output: state value V(s)
+
+    Uses 2 hidden layers (same depth as actor and HMARL's low-level policy)
+    for fair parameter count comparison.
+    """
+    def __init__(self, obs_dim: int = CENTRALIZED_OBS_DIM, hidden: int = HIDDEN_DIM):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 128), nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+
+    def forward(self, centralized_obs):
+        return self.net(centralized_obs).squeeze(-1)
+
+
+def build_centralized_obs(obs_list: List[np.ndarray]) -> np.ndarray:
+    """Concatenate all agents' observations into one centralized obs vector.
+
+    Args:
+        obs_list: list of 11 (115,) arrays, one per agent
+    Returns:
+        (1265,) float32 array
+    """
+    return np.concatenate(obs_list).astype(np.float32)
+
+
+class MAPPORolloutBuffer:
+    """Rollout buffer storing both local obs (for actor) and centralized obs
+    (for critic).
+    """
 
     def __init__(self):
-        self.obs = []
+        self.reset()
+
+    def reset(self):
+        self.obs = []              # per-agent local obs
+        self.centralized_obs = []  # full team obs at each agent's timestep
         self.actions = []
         self.log_probs = []
         self.rewards = []
         self.values = []
         self.dones = []
+        self.advantages = []
+        self.returns = []
 
-    def reset(self):
-        self.obs.clear()
-        self.actions.clear()
-        self.log_probs.clear()
-        self.rewards.clear()
-        self.values.clear()
-        self.dones.clear()
-
-    def add(self, obs, action, log_prob, reward, value, done):
+    def add(self, obs, centralized_obs, action, log_prob, value, reward=0.0, done=0.0):
         self.obs.append(obs)
+        self.centralized_obs.append(centralized_obs)
         self.actions.append(action)
         self.log_probs.append(log_prob)
         self.rewards.append(reward)
@@ -111,34 +147,48 @@ class IPPORolloutBuffer:
         self.dones.append(done)
 
     def compute_gae(self, last_value, gamma=GAMMA, lam=GAE_LAMBDA):
+        """Compute GAE using centralized values."""
         T = len(self.rewards)
         self.advantages = [0.0] * T
         self.returns = [0.0] * T
         gae = 0.0
         for t in reversed(range(T)):
             next_val = self.values[t + 1] if t < T - 1 else last_value
-            delta = self.rewards[t] + gamma * next_val * (1 - self.dones[t]) - self.values[t]
+            delta = (self.rewards[t] + gamma * next_val * (1 - self.dones[t])
+                     - self.values[t])
             gae = delta + gamma * lam * (1 - self.dones[t]) * gae
             self.advantages[t] = gae
             self.returns[t] = gae + self.values[t]
 
     def get_batches(self, bs=MINIBATCH_SIZE):
+        """Yield random mini-batches."""
         T = len(self.obs)
         indices = np.random.permutation(T)
         for start in range(0, T, bs):
             end = min(start + bs, T)
             idx = indices[start:end]
             yield {
-                'obs': torch.FloatTensor(np.array([self.obs[i] for i in idx])).to(DEVICE),
+                'obs': torch.FloatTensor(
+                    np.array([self.obs[i] for i in idx])
+                ).to(DEVICE),
+                'centralized_obs': torch.FloatTensor(
+                    np.array([self.centralized_obs[i] for i in idx])
+                ).to(DEVICE),
                 'actions': torch.LongTensor([self.actions[i] for i in idx]).to(DEVICE),
-                'log_probs_old': torch.FloatTensor([self.log_probs[i] for i in idx]).to(DEVICE),
-                'advantages': torch.FloatTensor([self.advantages[i] for i in idx]).to(DEVICE),
-                'returns': torch.FloatTensor([self.returns[i] for i in idx]).to(DEVICE),
+                'log_probs_old': torch.FloatTensor(
+                    [self.log_probs[i] for i in idx]
+                ).to(DEVICE),
+                'advantages': torch.FloatTensor(
+                    [self.advantages[i] for i in idx]
+                ).to(DEVICE),
+                'returns': torch.FloatTensor(
+                    [self.returns[i] for i in idx]
+                ).to(DEVICE),
             }
 
 
 def extract_obs_vector(game_state, player_idx):
-    """Extract 115-dim observation for a player from raw dict."""
+    """Extract 115-dim observation vector for a player from raw dict."""
     features = []
     ball = game_state.get('ball', [0, 0, 0])
     features.extend(ball)
@@ -149,10 +199,14 @@ def extract_obs_vector(game_state, player_idx):
 
     for i in range(11):
         pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-        direction = game_state.get('left_team_direction', [[0, 0]] * 11)[i] if 'left_team_direction' in game_state else [0, 0]
-        tired = game_state.get('left_team_tired_factor', [0.0] * 11)[i] if 'left_team_tired_factor' in game_state else 0.0
-        yellow = game_state.get('left_team_yellow_card', [0] * 11)[i] if 'left_team_yellow_card' in game_state else 0
-        role = game_state.get('left_team_roles', [5] * 11)[i] if 'left_team_roles' in game_state else 5
+        direction = (game_state.get('left_team_direction', [[0, 0]] * 11)[i]
+                     if 'left_team_direction' in game_state else [0, 0])
+        tired = (game_state.get('left_team_tired_factor', [0.0] * 11)[i]
+                 if 'left_team_tired_factor' in game_state else 0.0)
+        yellow = (game_state.get('left_team_yellow_card', [0] * 11)[i]
+                  if 'left_team_yellow_card' in game_state else 0)
+        role = (game_state.get('left_team_roles', [5] * 11)[i]
+                if 'left_team_roles' in game_state else 5)
         features.append(1.0 if i == player_idx else 0.0)
         features.extend(pos)
         features.extend(direction)
@@ -166,8 +220,14 @@ def extract_obs_vector(game_state, player_idx):
     return np.array(features, dtype=np.float32)
 
 
-class IPPOTrainer:
-    """Independent PPO: trains one shared policy for all agents (flat)."""
+class MAPPOTrainer:
+    """MAPPO: decentralized actors + centralized critic.
+
+    Training loop:
+    1. Collect per-agent transitions with centralized value estimates
+    2. Compute GAE using centralized critic's values
+    3. Joint update: actor loss (per-agent local obs) + critic loss (centralized obs)
+    """
 
     def __init__(self, total_timesteps=TOTAL_TIMESTEPS, log_dir="dumps", render=False):
         self.total_timesteps = total_timesteps
@@ -175,16 +235,24 @@ class IPPOTrainer:
         self.render = render
 
         self.env = create_raw_env(render=render)
-        self.policy = FlatActorCritic().to(DEVICE)
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=LEARNING_RATE, eps=1e-5)
-        self.buffer = IPPORolloutBuffer()
+
+        # Decentralized actor (shared weights, per-agent obs)
+        self.actor = DecentralizedActor().to(DEVICE)
+        # Centralized critic (sees all agents' obs concatenated)
+        self.critic = CentralizedCritic().to(DEVICE)
+
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LEARNING_RATE, eps=1e-5)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LEARNING_RATE, eps=1e-5)
+
+        self.buffer = MAPPORolloutBuffer()
 
         os.makedirs(log_dir, exist_ok=True)
         self.global_step = 0
         self.episode_count = 0
 
     def train(self):
-        print(f"IPPO Training | Device: {DEVICE} | Timesteps: {self.total_timesteps:,}")
+        print(f"MAPPO Training | Device: {DEVICE} | Timesteps: {self.total_timesteps:,}")
+        print(f"  Actor: 115-dim obs -> action | Critic: {CENTRALIZED_OBS_DIM}-dim centralized obs -> value")
         start = time.time()
 
         while self.global_step < self.total_timesteps:
@@ -197,25 +265,37 @@ class IPPOTrainer:
             done = False
             step = 0
 
-            # Collect transitions for all agents
-            agent_transitions = {i: [] for i in range(NUM_AGENTS)}
-
             while not done and step < EPISODE_MAX_STEPS:
+                # Build all agents' local observations
+                all_obs = [extract_obs_vector(game_state, i) for i in range(NUM_AGENTS)]
+                centralized_obs = build_centralized_obs(all_obs)
+
+                # Get centralized value estimate
+                central_obs_t = torch.FloatTensor(centralized_obs).unsqueeze(0).to(DEVICE)
+                with torch.no_grad():
+                    central_value = self.critic(central_obs_t).item()
+
+                # Collect per-agent actions using decentralized actor
                 joint_actions = []
                 for i in range(NUM_AGENTS):
-                    obs_vec = extract_obs_vector(game_state, i)
-                    obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
-
+                    obs_t = torch.FloatTensor(all_obs[i]).unsqueeze(0).to(DEVICE)
                     with torch.no_grad():
-                        action, log_prob, _, value = self.policy.get_action_and_value(obs_t)
+                        action, log_prob, _ = self.actor.get_action_and_value(obs_t)
 
                     a = action.item()
                     lp = log_prob.item()
-                    v = value.item()
                     joint_actions.append(a)
 
-                    agent_transitions[i].append((obs_vec, a, lp, v))
+                    # Store: local obs (for actor), centralized obs (for critic)
+                    self.buffer.add(
+                        obs=all_obs[i],
+                        centralized_obs=centralized_obs,
+                        action=a,
+                        log_prob=lp,
+                        value=central_value,  # all agents share same centralized value
+                    )
 
+                # Step environment
                 step_result = self.env.step(joint_actions)
                 if len(step_result) == 5:
                     obs_raw_new, reward, terminated, truncated, info = step_result
@@ -223,29 +303,30 @@ class IPPOTrainer:
                 else:
                     obs_raw_new, reward, done, info = step_result
                 team_reward = float(np.sum(reward))
+
+                # Fill rewards for all agents in this timestep
+                for i in range(NUM_AGENTS):
+                    idx = len(self.buffer.rewards) - NUM_AGENTS + i
+                    self.buffer.rewards[idx] = team_reward
+                    self.buffer.dones[idx] = float(done)
+
                 obs_raw = obs_raw_new
                 game_state = extract_game_state(obs_raw)
-
-                for i in range(NUM_AGENTS):
-                    obs_vec, a, lp, v = agent_transitions[i][-1]
-                    self.buffer.add(
-                        obs_vec, a, lp,
-                        team_reward / NUM_AGENTS,
-                        v, float(done),
-                    )
-
                 episode_reward += team_reward
                 step += 1
                 self.global_step += NUM_AGENTS
 
-            # PPO update
+            # Compute last centralized value for GAE
             with torch.no_grad():
-                last_obs = torch.FloatTensor(extract_obs_vector(game_state, 0)).unsqueeze(0).to(DEVICE)
-                _, _, _, last_val = self.policy.get_action_and_value(last_obs)
-                last_value = last_val.item()
+                last_central = torch.FloatTensor(
+                    build_centralized_obs(
+                        [extract_obs_vector(game_state, i) for i in range(NUM_AGENTS)]
+                    )
+                ).unsqueeze(0).to(DEVICE)
+                last_value = self.critic(last_central).item()
 
             self.buffer.compute_gae(last_value)
-            self._ppo_update()
+            self._update()
 
             self.episode_count += 1
             if self.episode_count % 500 == 0:
@@ -255,9 +336,7 @@ class IPPOTrainer:
                     f"Reward: {episode_reward:7.2f} | "
                     f"Steps/s: {self.global_step/max(elapsed,1):.1f}"
                 )
-
-            # Mid-training evaluation + save every 500 episodes
-            if self.episode_count % 500 == 0:
+                # Mid-training evaluation + save
                 self._save()
                 eval_stats = self._quick_eval(num_episodes=10)
                 print(
@@ -267,13 +346,17 @@ class IPPOTrainer:
                 )
 
         self._save()
-        print(f"\nIPPO Training complete. ({time.time()-start:.1f}s)")
+        print(f"\nMAPPO Training complete. ({time.time()-start:.1f}s)")
 
-    def _ppo_update(self):
-        self.policy.train()
+    def _update(self):
+        """Joint actor + critic PPO update."""
+        self.actor.train()
+        self.critic.train()
+
         for _ in range(NUM_EPOCHS):
             for batch in self.buffer.get_batches():
                 obs = batch['obs']
+                central_obs = batch['centralized_obs']
                 actions = batch['actions']
                 old_lp = batch['log_probs_old']
                 adv = batch['advantages']
@@ -281,27 +364,36 @@ class IPPOTrainer:
 
                 adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-                _, new_lp, entropy, values = self.policy.get_action_and_value(obs, actions)
-
+                # Actor update (decentralized — uses local obs)
+                _, new_lp, entropy = self.actor.get_action_and_value(obs, actions)
                 ratio = torch.exp(new_lp - old_lp)
                 s1 = ratio * adv
                 s2 = torch.clamp(ratio, 1 - CLIP_RANGE, 1 + CLIP_RANGE) * adv
-                pg_loss = -torch.min(s1, s2).mean()
-                v_loss = nn.MSELoss()(values, returns)
-                loss = pg_loss + VF_COEF * v_loss - ENT_COEF * entropy.mean()
+                actor_loss = -torch.min(s1, s2).mean() - ENT_COEF * entropy.mean()
 
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
-                self.optimizer.step()
+                self.actor_optimizer.zero_grad()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
+                self.actor_optimizer.step()
+
+                # Critic update (centralized — uses full team obs)
+                values = self.critic(central_obs)
+                critic_loss = nn.MSELoss()(values, returns)
+
+                self.critic_optimizer.zero_grad()
+                critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+                self.critic_optimizer.step()
 
         self.buffer.reset()
 
     def _save(self):
-        path = os.path.join(self.log_dir, "ippo_model.pt")
+        path = os.path.join(self.log_dir, "mappo_model.pt")
         torch.save({
-            'policy_state': self.policy.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
+            'actor_state': self.actor.state_dict(),
+            'critic_state': self.critic.state_dict(),
+            'actor_optimizer_state': self.actor_optimizer.state_dict(),
+            'critic_optimizer_state': self.critic_optimizer.state_dict(),
             'global_step': self.global_step,
             'episode_count': self.episode_count,
         }, path)
@@ -309,14 +401,16 @@ class IPPOTrainer:
 
     def load(self, path):
         ckpt = torch.load(path, map_location=DEVICE)
-        self.policy.load_state_dict(ckpt['policy_state'])
-        self.optimizer.load_state_dict(ckpt['optimizer_state'])
+        self.actor.load_state_dict(ckpt['actor_state'])
+        self.critic.load_state_dict(ckpt['critic_state'])
+        self.actor_optimizer.load_state_dict(ckpt['actor_optimizer_state'])
+        self.critic_optimizer.load_state_dict(ckpt['critic_optimizer_state'])
         self.global_step = ckpt['global_step']
         self.episode_count = ckpt['episode_count']
 
     def _quick_eval(self, num_episodes: int = 10) -> Dict:
         """Run quick evaluation during training."""
-        self.policy.eval()
+        self.actor.eval()
         eval_env = create_raw_env(render=False)
         wins, total_goals_for, total_goals_against, total_reward = 0, 0, 0, 0.0
 
@@ -334,7 +428,7 @@ class IPPOTrainer:
                     obs_vec = extract_obs_vector(game_state, i)
                     obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
                     with torch.no_grad():
-                        logits, _ = self.policy(obs_t)
+                        logits, _ = self.actor(obs_t)
                         joint_actions.append(logits.argmax(dim=-1).item())
 
                 step_result = eval_env.step(joint_actions)
@@ -355,7 +449,7 @@ class IPPOTrainer:
             total_reward += ep_reward
 
         eval_env.close()
-        self.policy.train()
+        self.actor.train()
         return {
             'win_rate': wins / num_episodes * 100.0,
             'avg_reward': total_reward / num_episodes,
@@ -365,7 +459,7 @@ class IPPOTrainer:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Train IPPO baseline")
+    parser = argparse.ArgumentParser(description="Train MAPPO baseline")
     parser.add_argument("--timesteps", type=int, default=TOTAL_TIMESTEPS)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--log-dir", type=str, default="dumps")
@@ -376,7 +470,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     set_seed(args.seed)
-    trainer = IPPOTrainer(
+    trainer = MAPPOTrainer(
         total_timesteps=args.timesteps,
         log_dir=args.log_dir,
         render=args.render,

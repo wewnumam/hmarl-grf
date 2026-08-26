@@ -136,17 +136,16 @@ def create_raw_env(
     num_agents: int = NUM_AGENTS,
     log_dir: str = LOG_DIR,
     render: bool = False,
+    write_dumps: bool = False,
 ) -> Any:
-    """Create GRF environment with raw representation.
-    Returns list[dict] obs — one dict per controlled agent (all identical).
-    No patching needed: raw obs works directly with old gym API."""
+    """Create GRF environment with raw representation."""
     return football_env.create_environment(
         env_name=env_name,
         representation="raw",
         number_of_left_players_agent_controls=num_agents,
         stacked=False,
         logdir=log_dir,
-        write_full_episode_dumps=True,
+        write_full_episode_dumps=write_dumps,
         render=render,
     )
 
@@ -156,16 +155,16 @@ def create_simple_env(
     num_agents: int = NUM_AGENTS,
     log_dir: str = LOG_DIR,
     render: bool = False,
+    write_dumps: bool = False,
 ) -> Any:
-    """Create GRF environment with simple115v2 representation.
-    No patching needed — simple115v2 returns proper numpy arrays."""
+    """Create GRF environment with simple115v2 representation."""
     return football_env.create_environment(
         env_name=env_name,
         representation="simple115v2",
         number_of_left_players_agent_controls=num_agents,
         stacked=False,
         logdir=log_dir,
-        write_full_episode_dumps=True,
+        write_full_episode_dumps=write_dumps,
         render=render,
     )
 

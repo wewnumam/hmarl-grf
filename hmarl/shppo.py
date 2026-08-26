@@ -1,8 +1,13 @@
-"""Independent PPO (IPPO) Baseline.
+"""Shared PPO (SHPPO) Baseline.
 
-Each of the 11 agents is trained independently with its own PPO policy.
-No hierarchical structure - flat policy from observation to action.
-Used as comparison baseline per thesis BAB_4.
+All 11 agents share a single actor-critic network. Unlike IPPO which tracks
+per-agent transitions independently, SHPPO pools ALL agents' experiences
+into one unified buffer, computes a single GAE over the pooled data, and
+performs one centralized PPO update.
+
+Key difference from IPPO:
+  IPPO:  per-agent transition tracking, reward split evenly to each agent
+  SHPPO: all agent transitions pooled into one buffer, team-level GAE
 
 Note: Baselines use game reward only (no FAI/PPR/RCI reward shaping).
 This ensures a fair comparison — HMARL's improvement over baselines
@@ -49,25 +54,26 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-class FlatActorCritic(nn.Module):
-    """Flat Actor-Critic (no hierarchy). MLP with shared layers."""
+class SharedActorCritic(nn.Module):
+    """Shared Actor-Critic (same as IPPO's FlatActorCritic).
 
-    def __init__(self, obs_dim: int = OBS_DIM, action_dim: int = ACTION_SPACE_SIZE, hidden: int = HIDDEN_DIM):
+    All agents use the same network. Difference from IPPO is in training:
+    SHPPO pools all agents' data into one buffer for unified update.
+    """
+
+    def __init__(self, obs_dim: int = OBS_DIM, action_dim: int = ACTION_SPACE_SIZE,
+                 hidden: int = HIDDEN_DIM):
         super().__init__()
         self.shared = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
         )
         self.policy_head = nn.Sequential(
-            nn.Linear(hidden, 128),
-            nn.ReLU(),
+            nn.Linear(hidden, 128), nn.ReLU(),
             nn.Linear(128, action_dim),
         )
         self.value_head = nn.Sequential(
-            nn.Linear(hidden, 128),
-            nn.ReLU(),
+            nn.Linear(hidden, 128), nn.ReLU(),
             nn.Linear(128, 1),
         )
 
@@ -83,24 +89,25 @@ class FlatActorCritic(nn.Module):
         return action, dist.log_prob(action), dist.entropy(), value.squeeze(-1)
 
 
-class IPPORolloutBuffer:
-    """Per-agent rollout buffer for IPPO."""
+class SHPPORolloutBuffer:
+    """Unified rollout buffer — pools ALL agents' transitions.
+
+    Unlike IPPO which tracks per-agent indices separately, SHPPO treats
+    all (agent, timestep) pairs as independent samples in one flat buffer.
+    """
 
     def __init__(self):
+        self.reset()
+
+    def reset(self):
         self.obs = []
         self.actions = []
         self.log_probs = []
         self.rewards = []
         self.values = []
         self.dones = []
-
-    def reset(self):
-        self.obs.clear()
-        self.actions.clear()
-        self.log_probs.clear()
-        self.rewards.clear()
-        self.values.clear()
-        self.dones.clear()
+        self.advantages = []
+        self.returns = []
 
     def add(self, obs, action, log_prob, reward, value, done):
         self.obs.append(obs)
@@ -111,18 +118,21 @@ class IPPORolloutBuffer:
         self.dones.append(done)
 
     def compute_gae(self, last_value, gamma=GAMMA, lam=GAE_LAMBDA):
+        """Compute GAE over the pooled buffer (all agents)."""
         T = len(self.rewards)
         self.advantages = [0.0] * T
         self.returns = [0.0] * T
         gae = 0.0
         for t in reversed(range(T)):
             next_val = self.values[t + 1] if t < T - 1 else last_value
-            delta = self.rewards[t] + gamma * next_val * (1 - self.dones[t]) - self.values[t]
+            delta = (self.rewards[t] + gamma * next_val * (1 - self.dones[t])
+                     - self.values[t])
             gae = delta + gamma * lam * (1 - self.dones[t]) * gae
             self.advantages[t] = gae
             self.returns[t] = gae + self.values[t]
 
     def get_batches(self, bs=MINIBATCH_SIZE):
+        """Yield random mini-batches from pooled data."""
         T = len(self.obs)
         indices = np.random.permutation(T)
         for start in range(0, T, bs):
@@ -138,7 +148,7 @@ class IPPORolloutBuffer:
 
 
 def extract_obs_vector(game_state, player_idx):
-    """Extract 115-dim observation for a player from raw dict."""
+    """Extract 115-dim observation vector for a player from raw dict."""
     features = []
     ball = game_state.get('ball', [0, 0, 0])
     features.extend(ball)
@@ -149,10 +159,14 @@ def extract_obs_vector(game_state, player_idx):
 
     for i in range(11):
         pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-        direction = game_state.get('left_team_direction', [[0, 0]] * 11)[i] if 'left_team_direction' in game_state else [0, 0]
-        tired = game_state.get('left_team_tired_factor', [0.0] * 11)[i] if 'left_team_tired_factor' in game_state else 0.0
-        yellow = game_state.get('left_team_yellow_card', [0] * 11)[i] if 'left_team_yellow_card' in game_state else 0
-        role = game_state.get('left_team_roles', [5] * 11)[i] if 'left_team_roles' in game_state else 5
+        direction = (game_state.get('left_team_direction', [[0, 0]] * 11)[i]
+                     if 'left_team_direction' in game_state else [0, 0])
+        tired = (game_state.get('left_team_tired_factor', [0.0] * 11)[i]
+                 if 'left_team_tired_factor' in game_state else 0.0)
+        yellow = (game_state.get('left_team_yellow_card', [0] * 11)[i]
+                  if 'left_team_yellow_card' in game_state else 0)
+        role = (game_state.get('left_team_roles', [5] * 11)[i]
+                if 'left_team_roles' in game_state else 5)
         features.append(1.0 if i == player_idx else 0.0)
         features.extend(pos)
         features.extend(direction)
@@ -166,8 +180,14 @@ def extract_obs_vector(game_state, player_idx):
     return np.array(features, dtype=np.float32)
 
 
-class IPPOTrainer:
-    """Independent PPO: trains one shared policy for all agents (flat)."""
+class SHPPOTrainer:
+    """Shared PPO: one shared policy, pooled experience update.
+
+    Training loop:
+    1. Collect transitions from ALL agents into one unified buffer
+    2. Compute GAE over the entire pooled buffer
+    3. PPO update on pooled data (all agents contribute to one gradient)
+    """
 
     def __init__(self, total_timesteps=TOTAL_TIMESTEPS, log_dir="dumps", render=False):
         self.total_timesteps = total_timesteps
@@ -175,16 +195,16 @@ class IPPOTrainer:
         self.render = render
 
         self.env = create_raw_env(render=render)
-        self.policy = FlatActorCritic().to(DEVICE)
+        self.policy = SharedActorCritic().to(DEVICE)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=LEARNING_RATE, eps=1e-5)
-        self.buffer = IPPORolloutBuffer()
+        self.buffer = SHPPORolloutBuffer()
 
         os.makedirs(log_dir, exist_ok=True)
         self.global_step = 0
         self.episode_count = 0
 
     def train(self):
-        print(f"IPPO Training | Device: {DEVICE} | Timesteps: {self.total_timesteps:,}")
+        print(f"SHPPO Training | Device: {DEVICE} | Timesteps: {self.total_timesteps:,}")
         start = time.time()
 
         while self.global_step < self.total_timesteps:
@@ -197,11 +217,11 @@ class IPPOTrainer:
             done = False
             step = 0
 
-            # Collect transitions for all agents
-            agent_transitions = {i: [] for i in range(NUM_AGENTS)}
-
             while not done and step < EPISODE_MAX_STEPS:
+                # Collect ALL agents' transitions into one buffer per timestep
                 joint_actions = []
+                last_values = []
+
                 for i in range(NUM_AGENTS):
                     obs_vec = extract_obs_vector(game_state, i)
                     obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
@@ -213,9 +233,12 @@ class IPPOTrainer:
                     lp = log_prob.item()
                     v = value.item()
                     joint_actions.append(a)
+                    last_values.append(v)
 
-                    agent_transitions[i].append((obs_vec, a, lp, v))
+                    # Store in unified buffer (will get team reward later)
+                    self.buffer.add(obs_vec, a, lp, 0.0, v, 0.0)
 
+                # Step environment
                 step_result = self.env.step(joint_actions)
                 if len(step_result) == 5:
                     obs_raw_new, reward, terminated, truncated, info = step_result
@@ -223,24 +246,25 @@ class IPPOTrainer:
                 else:
                     obs_raw_new, reward, done, info = step_result
                 team_reward = float(np.sum(reward))
+
+                # Fill rewards: team_reward for ALL agents in this timestep
+                # (key SHPPO behavior — unified reward signal, not split)
+                for i in range(NUM_AGENTS):
+                    idx = len(self.buffer.rewards) - NUM_AGENTS + i
+                    self.buffer.rewards[idx] = team_reward
+                    self.buffer.dones[idx] = float(done)
+
                 obs_raw = obs_raw_new
                 game_state = extract_game_state(obs_raw)
-
-                for i in range(NUM_AGENTS):
-                    obs_vec, a, lp, v = agent_transitions[i][-1]
-                    self.buffer.add(
-                        obs_vec, a, lp,
-                        team_reward / NUM_AGENTS,
-                        v, float(done),
-                    )
-
                 episode_reward += team_reward
                 step += 1
                 self.global_step += NUM_AGENTS
 
-            # PPO update
+            # PPO update over pooled data
             with torch.no_grad():
-                last_obs = torch.FloatTensor(extract_obs_vector(game_state, 0)).unsqueeze(0).to(DEVICE)
+                last_obs = torch.FloatTensor(
+                    extract_obs_vector(game_state, 0)
+                ).unsqueeze(0).to(DEVICE)
                 _, _, _, last_val = self.policy.get_action_and_value(last_obs)
                 last_value = last_val.item()
 
@@ -255,9 +279,7 @@ class IPPOTrainer:
                     f"Reward: {episode_reward:7.2f} | "
                     f"Steps/s: {self.global_step/max(elapsed,1):.1f}"
                 )
-
-            # Mid-training evaluation + save every 500 episodes
-            if self.episode_count % 500 == 0:
+                # Mid-training evaluation + save
                 self._save()
                 eval_stats = self._quick_eval(num_episodes=10)
                 print(
@@ -267,9 +289,10 @@ class IPPOTrainer:
                 )
 
         self._save()
-        print(f"\nIPPO Training complete. ({time.time()-start:.1f}s)")
+        print(f"\nSHPPO Training complete. ({time.time()-start:.1f}s)")
 
     def _ppo_update(self):
+        """PPO update over the pooled buffer (all agents' data)."""
         self.policy.train()
         for _ in range(NUM_EPOCHS):
             for batch in self.buffer.get_batches():
@@ -298,7 +321,7 @@ class IPPOTrainer:
         self.buffer.reset()
 
     def _save(self):
-        path = os.path.join(self.log_dir, "ippo_model.pt")
+        path = os.path.join(self.log_dir, "shppo_model.pt")
         torch.save({
             'policy_state': self.policy.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
@@ -365,7 +388,7 @@ class IPPOTrainer:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Train IPPO baseline")
+    parser = argparse.ArgumentParser(description="Train SHPPO baseline")
     parser.add_argument("--timesteps", type=int, default=TOTAL_TIMESTEPS)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--log-dir", type=str, default="dumps")
@@ -376,7 +399,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     set_seed(args.seed)
-    trainer = IPPOTrainer(
+    trainer = SHPPOTrainer(
         total_timesteps=args.timesteps,
         log_dir=args.log_dir,
         render=args.render,

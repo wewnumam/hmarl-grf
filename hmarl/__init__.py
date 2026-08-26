@@ -8,4 +8,6 @@ Package structure:
     hmarl.rci          – Role Coherence Index computation
     hmarl.metrics      – Evaluation metrics suite
     hmarl.ippo         – Independent PPO baseline
+    hmarl.shppo        – Shared PPO baseline (pooled experience)
+    hmarl.mappo        – MAPPO baseline (centralized critic)
 """

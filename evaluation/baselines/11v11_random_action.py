@@ -47,7 +47,7 @@ class SoccerMatch:
             representation="raw",
             render=render,
             number_of_left_players_agent_controls=num_agents,
-            write_full_episode_dumps=True,
+            write_full_episode_dumps=False,
             logdir=LOG_DIR,
         )
         return self._patch_grf_env(env)
