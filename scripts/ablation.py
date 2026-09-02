@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from typing import Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,7 +30,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from hmarl.env import (
-    create_raw_env, NUM_AGENTS, ACTION_SPACE_SIZE,
+    create_raw_env, NUM_AGENTS,
     extract_game_state, get_action_category,
 )
 from hmarl.policy import (
@@ -43,48 +44,12 @@ from hmarl.reward import (
 )
 from hmarl.metrics import compute_win_rate, compute_goal_difference, compute_all_metrics, print_metrics
 from hmarl.rci import compute_rci
+from hmarl.utils import (
+    set_seed, extract_obs_vector, OBS_DIM, HIDDEN_DIM, HEAD_DIM,
+    ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker, cleanup_temp_dirs,
+)
 
-HIDDEN_DIM = 256
-HEAD_DIM = 128
-OBS_DIM = 115
-EPISODE_MAX_STEPS = 3000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def set_seed(seed: int):
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def extract_obs_vector(game_state, player_idx):
-    """Extract 115-dim observation vector."""
-    features = []
-    ball = game_state.get('ball', [0, 0, 0])
-    features.extend(ball)
-    features.extend(game_state.get('ball_direction', [0, 0, 0]))
-    features.extend(game_state.get('ball_rotation', [0, 0, 0]))
-    features.append(float(game_state.get('ball_owned_team', -1)))
-    features.append(float(game_state.get('ball_owned_player', -1)))
-    for i in range(11):
-        pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-        d = game_state.get('left_team_direction', [[0, 0]] * 11)[i] if 'left_team_direction' in game_state else [0, 0]
-        t = game_state.get('left_team_tired_factor', [0.0] * 11)[i] if 'left_team_tired_factor' in game_state else 0.0
-        y = game_state.get('left_team_yellow_card', [0] * 11)[i] if 'left_team_yellow_card' in game_state else 0
-        r = game_state.get('left_team_roles', [5] * 11)[i] if 'left_team_roles' in game_state else 5
-        features.append(1.0 if i == player_idx else 0.0)
-        features.extend(pos)
-        features.extend(d)
-        features.append(t)
-        features.append(float(y))
-        features.append(float(r))
-    features = features[:OBS_DIM]
-    while len(features) < OBS_DIM:
-        features.append(0.0)
-    return np.array(features, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -484,40 +449,47 @@ def main():
 
     total_start = time.time()
 
+    progress = ProgressTracker(total=len(configs_to_run), desc="Ablation configs")
     for config_name in configs_to_run:
         if config_name not in ABLATION_CONFIGS:
             print(f"  WARNING: Unknown config '{config_name}', skipping.")
+            progress.update(1, label=config_name)
             continue
 
-        config = ABLATION_CONFIGS[config_name]
-        print(f"\n--- {config_name}: {config['description']} ---")
+        try:
+            config = ABLATION_CONFIGS[config_name]
+            print(f"\n--- {config_name}: {config['description']} ---")
 
-        train_result = train_hmarl_config(
-            config_name=config_name,
-            timesteps=args.timesteps,
-            seed=args.seed,
-            reward_fn=config['reward_fn'],
-            flat_policy=config['flat_policy'],
-            random_expert=config['random_expert'],
-        )
+            train_result = train_hmarl_config(
+                config_name=config_name,
+                timesteps=args.timesteps,
+                seed=args.seed,
+                reward_fn=config['reward_fn'],
+                flat_policy=config['flat_policy'],
+                random_expert=config['random_expert'],
+            )
 
-        eval_result = evaluate_ablation_config(
-            ckpt_path=train_result['checkpoint'],
-            num_episodes=args.eval_episodes,
-            seed=args.seed + 1000,
-            flat_policy=config['flat_policy'],
-            random_expert=config['random_expert'],
-        )
+            eval_result = evaluate_ablation_config(
+                ckpt_path=train_result['checkpoint'],
+                num_episodes=args.eval_episodes,
+                seed=args.seed + 1000,
+                flat_policy=config['flat_policy'],
+                random_expert=config['random_expert'],
+            )
 
-        results[config_name] = {
-            'description': config['description'],
-            'train': train_result,
-            'eval': eval_result,
-        }
+            results[config_name] = {
+                'description': config['description'],
+                'train': train_result,
+                'eval': eval_result,
+            }
 
-        print(f"  Result: WR={eval_result['win_rate']:.1f}% | "
-              f"Reward={eval_result['avg_reward']:.2f} | "
-              f"GD={eval_result['goal_difference']}")
+            print(f"  Result: WR={eval_result['win_rate']:.1f}% | "
+                  f"Reward={eval_result['avg_reward']:.2f} | "
+                  f"GD={eval_result['goal_difference']}")
+        except Exception:
+            traceback.print_exc()
+            print(f"  FAILED: {config_name}, skipping.")
+        progress.update(1, label=config_name)
 
     # Summary table
     print(f"\n{'='*72}")
@@ -561,6 +533,8 @@ def main():
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {args.output}")
     print(f"Total time: {time.time()-total_start:.0f}s")
+
+    cleanup_temp_dirs(['ablation_temp'])
 
 
 if __name__ == "__main__":

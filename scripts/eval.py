@@ -14,6 +14,7 @@ Scenarios (from thesis BAB_4):
 import argparse
 import json
 import os
+import traceback
 import sys
 import time
 from typing import Dict, List, Optional
@@ -23,6 +24,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
+from hmarl.utils import (
+    OBS_DIM, HIDDEN_DIM, HEAD_DIM, ACTION_SPACE_SIZE, EPISODE_MAX_STEPS,
+    extract_obs_vector as _utils_obs,
+    load_hmarl_checkpoint as _load_ckpt,
+    ProgressTracker,
+)
 
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 from hmarl.policy import (
@@ -35,6 +42,11 @@ from hmarl.metrics import (
     compute_all_metrics, print_metrics,
     compute_win_rate, compute_goal_difference,
     team_compactness,
+    pass_network_matrix,
+    inter_agent_distance_per_line,
+    convex_hull_area,
+    action_transition_matrix,
+    ball_progression_rate,
 )
 from hmarl.rci import compute_rci
 from evaluation.visualizations import (
@@ -45,38 +57,28 @@ from evaluation.visualizations import (
     plot_compactness_over_time,
     plot_comparative_bars,
     plot_metric_correlation,
+    plot_pass_network,
+    plot_iad_per_line,
+    plot_convex_hull,
+    plot_action_transitions,
+    plot_bpr_distribution,
 )
 
 
-OBS_DIM = 115
-HIDDEN_DIM = 256
-HEAD_DIM = 128
-ACTION_SPACE_SIZE = 19
-EPISODE_MAX_STEPS = 3000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_hmarl_model(checkpoint_path: str):
     """Load trained HMARL model."""
-    subgoal_embedding = SubGoalEmbedding().to(DEVICE)
-    policy = HierarchicalActorCritic(
-        obs_dim=OBS_DIM,
-        subgoal_embed_dim=SUBGOAL_EMBED_DIM,
-        hidden_dim=HIDDEN_DIM,
-        head_dim=HEAD_DIM,
-        action_dim=ACTION_SPACE_SIZE,
-    ).to(DEVICE)
-
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    policy.load_state_dict(checkpoint['policy_state'])
-    subgoal_embedding.load_state_dict(checkpoint['subgoal_embedding_state'])
-
-    policy.eval()
-    subgoal_embedding.eval()
-
+    policy, subgoal_emb, meta = _load_ckpt(checkpoint_path, device=str(DEVICE))
     print(f"Model loaded from {checkpoint_path}")
-    print(f"  Trained for {checkpoint.get('global_step', '?')} steps")
-    return policy, subgoal_embedding
+    print(f"  Trained for {meta.get('global_step', '?')} steps")
+    if 'git_hash' in meta:
+        print(f"  Git: {meta['git_hash']}")
+    if 'hyperparams' in meta:
+        hp = meta['hyperparams']
+        print(f"  LR: {hp.get('learning_rate', '?')}, Gamma: {hp.get('gamma', '?')}")
+    return policy, subgoal_emb
 
 
 def _extract_dict_from_simple(obs):
@@ -103,33 +105,7 @@ def get_obs_vector(obs_or_state, player_idx):
         game_state = obs_or_state
     else:
         game_state = {}
-    features = []
-    ball = game_state.get('ball', [0, 0, 0])
-    ball_dir = game_state.get('ball_direction', [0, 0, 0])
-    ball_rot = game_state.get('ball_rotation', [0, 0, 0])
-    features.extend(ball)
-    features.extend(ball_dir)
-    features.extend(ball_rot)
-    features.append(float(game_state.get('ball_owned_team', -1)))
-    features.append(float(game_state.get('ball_owned_player', -1)))
-
-    for i in range(11):
-        pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-        direction = game_state.get('left_team_direction', [[0, 0]] * 11)[i] if 'left_team_direction' in game_state else [0, 0]
-        tired = game_state.get('left_team_tired_factor', [0.0] * 11)[i] if 'left_team_tired_factor' in game_state else 0.0
-        yellow = game_state.get('left_team_yellow_card', [0] * 11)[i] if 'left_team_yellow_card' in game_state else 0
-        role = game_state.get('left_team_roles', [5] * 11)[i] if 'left_team_roles' in game_state else 5
-        features.append(1.0 if i == player_idx else 0.0)
-        features.extend(pos)
-        features.extend(direction)
-        features.append(tired)
-        features.append(float(yellow))
-        features.append(float(role))
-
-    features = features[:OBS_DIM]
-    while len(features) < OBS_DIM:
-        features.append(0.0)
-    return np.array(features, dtype=np.float32)
+    return _utils_obs(game_state, player_idx, OBS_DIM)
 
 
 def evaluate_hmarl(
@@ -171,6 +147,7 @@ def evaluate_hmarl(
 
     print(f"\nEvaluating HMARL over {num_episodes} episodes...")
     print(f"{'='*60}")
+    progress = ProgressTracker(num_episodes, label="Eval HMARL", print_every=10)
 
     for ep in range(num_episodes):
         reset_result = env.reset()
@@ -275,16 +252,10 @@ def evaluate_hmarl(
         all_ideal_actions_flat.extend(episode_ideal_actions)
         all_game_states_flat.extend(episode_game_states)
 
-        # Print progress
-        if (ep + 1) % 10 == 0 or ep == 0:
-            avg_reward = np.mean(all_rewards)
-            wr = compute_win_rate(all_match_results)
-            print(
-                f"  Ep {ep+1:4d}/{num_episodes} | "
-                f"Result: {result:4s} ({gf}-{ga}) | "
-                f"Avg Reward: {avg_reward:7.2f} | "
-                f"Win Rate: {wr:.1f}%"
-            )
+        avg_reward = np.mean(all_rewards)
+        wr = compute_win_rate(all_match_results)
+        progress.update(extra=f"WR: {wr:.1f}% AvgR: {avg_reward:.1f}")
+    progress.done()
 
     # Compute aggregate metrics
     metrics = compute_all_metrics(
@@ -375,8 +346,61 @@ def evaluate_hmarl(
                 os.path.join(plots_dir, "08_compactness.png"),
             )
         print(f"Visualizations saved to {plots_dir}")
+
+        # --- Extended metrics and visualizations ---
+        # Pass network
+        pn = pass_network_matrix(all_game_states_flat, all_actual_actions_flat)
+        if pn.sum() > 0:
+            plot_pass_network(
+                pn,
+                os.path.join(plots_dir, '13_pass_network.png'),
+                roles=all_roles,
+            )
+
+        # Inter-agent distance per line
+        iad = inter_agent_distance_per_line(all_game_states_flat)
+        metrics['defence_midfield_gap'] = iad['defence_midfield_gap']
+        metrics['midfield_attack_gap'] = iad['midfield_attack_gap']
+        metrics['overall_spread'] = iad['overall_spread']
+
+        # Convex hull area
+        ch_mean, ch_std, ch_min, ch_max = convex_hull_area(all_game_states_flat)
+        metrics['convex_hull_mean'] = ch_mean
+        metrics['convex_hull_std'] = ch_std
+        metrics['convex_hull_min'] = ch_min
+        metrics['convex_hull_max'] = ch_max
+
+        # Action transition matrix
+        _, trans_probs = action_transition_matrix(all_actual_actions_flat)
+        plot_action_transitions(
+            trans_probs,
+            os.path.join(plots_dir, '16_action_transitions.png'),
+            title='Action Transition Probabilities (HMARL)',
+        )
+
+        # Ball progression rate
+        bpr_mean, bpr_std = ball_progression_rate(all_game_states_flat)
+        metrics['bpr_mean'] = bpr_mean
+        metrics['bpr_std'] = bpr_std
+
+        # Update JSON with extended metrics
+        serializable_ext = {}
+        for k in ('defence_midfield_gap', 'midfield_attack_gap', 'overall_spread',
+                   'convex_hull_mean', 'convex_hull_std', 'convex_hull_min', 'convex_hull_max',
+                   'bpr_mean', 'bpr_std'):
+            v = metrics.get(k, 0)
+            if isinstance(v, (np.floating, np.integer)):
+                v = float(v)
+            serializable_ext[k] = v
+        with open(results_path, 'r') as f:
+            existing = json.load(f)
+        existing.update(serializable_ext)
+        with open(results_path, 'w') as f:
+            json.dump(existing, f, indent=2)
+        print(f"Extended metrics saved to {results_path}")
     except Exception as e:
-        print(f"Warning: Visualization generation failed: {e}")
+        print(f"Warning: Extended visualization generation failed: {e}")
+        traceback.print_exc()
 
     env.close()
     return metrics
@@ -404,6 +428,7 @@ def evaluate_random_baseline(
     all_game_states_flat = []
 
     print(f"\nEvaluating Random Baseline over {num_episodes} episodes...")
+    progress_r = ProgressTracker(num_episodes, label="Eval Random", print_every=10)
 
     for ep in range(num_episodes):
         reset_result = env.reset()
@@ -473,6 +498,8 @@ def evaluate_random_baseline(
         all_actual_actions_flat.extend(episode_actions)
         all_ideal_actions_flat.extend(episode_ideals)
         all_game_states_flat.extend(episode_states)
+        progress_r.update(extra=f"({gf}-{ga})")
+    progress_r.done()
 
     metrics = compute_all_metrics(
         actual_actions=all_actual_actions_flat,
@@ -558,4 +585,8 @@ if __name__ == "__main__":
         print(f"  {'Positional Entropy':<25} {hmarl_metrics['positional_entropy']:>12.4f} {random_metrics.get('positional_entropy', 0):>12.4f}")
         print(f"  {'Compactness':<25} {hmarl_metrics['compactness_mean']:>12.4f} {random_metrics.get('compactness_mean', 0):>12.4f}")
         print(f"  {'FAI':<25} {hmarl_metrics['fai_mean']:>12.4f} {random_metrics.get('fai_mean', 0):>12.4f}")
+        print(f"  {'Def-Mid Gap':<25} {hmarl_metrics.get('defence_midfield_gap', 0):>12.4f} {random_metrics.get('defence_midfield_gap', 0):>12.4f}")
+        print(f"  {'Mid-Att Gap':<25} {hmarl_metrics.get('midfield_attack_gap', 0):>12.4f} {random_metrics.get('midfield_attack_gap', 0):>12.4f}")
+        print(f"  {'Convex Hull':<25} {hmarl_metrics.get('convex_hull_mean', 0):>12.4f} {random_metrics.get('convex_hull_mean', 0):>12.4f}")
+        print(f"  {'BPR Mean':<25} {hmarl_metrics.get('bpr_mean', 0):>12.4f} {random_metrics.get('bpr_mean', 0):>12.4f}")
         print(f"{'='*60}")

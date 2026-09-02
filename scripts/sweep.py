@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from typing import Dict, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +28,10 @@ from hmarl.expert import ExpertPolicyAllAgents
 from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
 from hmarl.metrics import compute_win_rate, compute_goal_difference, formation_adherence_index, team_compactness
 from hmarl.rci import compute_rci
+from hmarl.utils import (
+    set_seed, OBS_DIM, HIDDEN_DIM, HEAD_DIM, EPISODE_MAX_STEPS,
+    ProgressTracker, cleanup_temp_dirs, extract_obs_vector,
+)
 
 try:
     import optuna
@@ -39,21 +44,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-HIDDEN_DIM = 256
-HEAD_DIM = 128
-OBS_DIM = 115
-EPISODE_MAX_STEPS = 3000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SAVE_DIR = "sweep_results"
-
-
-def set_seed(seed: int):
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def evaluate_policy(
@@ -95,29 +87,7 @@ def evaluate_policy(
 
             joint_actions = []
             for i in range(NUM_AGENTS):
-                features = []
-                ball = game_state.get('ball', [0, 0, 0])
-                features.extend(ball)
-                features.extend(game_state.get('ball_direction', [0, 0, 0]))
-                features.extend(game_state.get('ball_rotation', [0, 0, 0]))
-                features.append(float(game_state.get('ball_owned_team', -1)))
-                features.append(float(game_state.get('ball_owned_player', -1)))
-                for j in range(11):
-                    pos = game_state.get('left_team', [[0, 0]] * 11)[j]
-                    d = game_state.get('left_team_direction', [[0, 0]] * 11)[j] if 'left_team_direction' in game_state else [0, 0]
-                    t = game_state.get('left_team_tired_factor', [0.0] * 11)[j] if 'left_team_tired_factor' in game_state else 0.0
-                    y = game_state.get('left_team_yellow_card', [0] * 11)[j] if 'left_team_yellow_card' in game_state else 0
-                    r = game_state.get('left_team_roles', [5] * 11)[j] if 'left_team_roles' in game_state else 5
-                    features.append(1.0 if j == i else 0.0)
-                    features.extend(pos)
-                    features.extend(d)
-                    features.append(t)
-                    features.append(float(y))
-                    features.append(float(r))
-                features = features[:OBS_DIM]
-                while len(features) < OBS_DIM:
-                    features.append(0.0)
-                obs_vec = np.array(features, dtype=np.float32)
+                obs_vec = extract_obs_vector(game_state, i)
 
                 with torch.no_grad():
                     sg_embed = subgoal_embedding(
@@ -297,6 +267,8 @@ def main():
     with open(study_path, 'wb') as f:
         pickle.dump(study, f)
     print(f"Full study saved to {study_path}")
+
+    cleanup_temp_dirs(['sweep_temp'])
 
 
 if __name__ == "__main__":

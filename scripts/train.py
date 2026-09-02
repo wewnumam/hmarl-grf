@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from hmarl.utils import set_seed as _set_seed_util, extract_obs_vector as _extract_obs_util, save_checkpoint as _save_ckpt
 try:
     from torch.utils.tensorboard import SummaryWriter
     HAS_TB = True
@@ -73,9 +74,7 @@ NUM_EVAL_EPISODES = 100
 DUMP_FREQ = 500          # Enable dump every N episodes
 MAX_DUMPS = 10            # Keep at most N dump files
 
-HIDDEN_DIM = 256
-HEAD_DIM = 128
-OBS_DIM = 115  # simple115v2 features
+from hmarl.utils import HIDDEN_DIM, HEAD_DIM, OBS_DIM
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -84,13 +83,8 @@ MODEL_DIR = "checkpoints"
 
 
 def set_seed(seed: int):
-    """Set random seeds for reproducibility."""
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    """Set random seeds for reproducibility (delegates to hmarl.utils)."""
+    _set_seed_util(seed)
 
 
 # ---------------------------------------------------------------------------
@@ -259,40 +253,8 @@ class HMARLTrainer:
         self.episode_count = 0
 
     def _get_obs_vector(self, game_state: Dict, player_idx: int) -> np.ndarray:
-        """Extract 115-dim observation vector for a specific player from raw dict."""
-        features = []
-
-        # Ball info (11 features)
-        ball = game_state.get('ball', [0, 0, 0])
-        ball_dir = game_state.get('ball_direction', [0, 0, 0])
-        ball_rot = game_state.get('ball_rotation', [0, 0, 0])
-        features.extend(ball)
-        features.extend(ball_dir)
-        features.extend(ball_rot)
-        features.append(float(game_state.get('ball_owned_team', -1)))
-        features.append(float(game_state.get('ball_owned_player', -1)))
-
-        # Left team (11 players × 10 features = 110)
-        for i in range(11):
-            pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-            direction = game_state.get('left_team_direction', [[0, 0]] * 11)[i] if 'left_team_direction' in game_state else [0, 0]
-            tired = game_state.get('left_team_tired_factor', [0.0] * 11)[i] if 'left_team_tired_factor' in game_state else 0.0
-            yellow = game_state.get('left_team_yellow_card', [0] * 11)[i] if 'left_team_yellow_card' in game_state else 0
-            role = game_state.get('left_team_roles', [5] * 11)[i] if 'left_team_roles' in game_state else 5
-
-            features.append(1.0 if i == player_idx else 0.0)  # active
-            features.extend(pos)
-            features.extend(direction)
-            features.append(tired)
-            features.append(float(yellow))
-            features.append(float(role))
-
-        # Pad or truncate to 115
-        features = features[:OBS_DIM]
-        while len(features) < OBS_DIM:
-            features.append(0.0)
-
-        return np.array(features, dtype=np.float32)
+        """Extract 115-dim observation vector (delegates to hmarl.utils)."""
+        return _extract_obs_util(game_state, player_idx, OBS_DIM)
 
     def _get_subgoal_embed(self, sub_goal: int) -> np.ndarray:
         """Get sub-goal embedding vector."""
@@ -663,15 +625,32 @@ class HMARLTrainer:
         return self._run_episode(training=training)
 
     def _save_checkpoint(self):
-        """Save model checkpoint."""
+        """Save model checkpoint with reproducibility metadata."""
         path = os.path.join(self.model_dir, "hmarl_model.pt")
-        torch.save({
-            'policy_state': self.policy.state_dict(),
-            'subgoal_embedding_state': self.subgoal_embedding.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
-            'global_step': self.global_step,
-            'episode_count': self.episode_count,
-        }, path)
+        _save_ckpt(
+            path,
+            policy_state=self.policy.state_dict(),
+            subgoal_embedding_state=self.subgoal_embedding.state_dict(),
+            optimizer_state=self.optimizer.state_dict(),
+            extra={
+                'global_step': self.global_step,
+                'episode_count': self.episode_count,
+                'hyperparams': {
+                    'learning_rate': LEARNING_RATE,
+                    'gamma': GAMMA,
+                    'gae_lambda': GAE_LAMBDA,
+                    'clip_range': CLIP_RANGE,
+                    'ent_coef': ENT_COEF,
+                    'vf_coef': VF_COEF,
+                    'minibatch_size': MINIBATCH_SIZE,
+                    'num_epochs': NUM_EPOCHS,
+                    'total_timesteps': self.total_timesteps,
+                    'hidden_dim': HIDDEN_DIM,
+                    'head_dim': HEAD_DIM,
+                    'obs_dim': OBS_DIM,
+                },
+            },
+        )
         print(f"Checkpoint saved: {path}")
 
     def _cleanup_dumps(self):

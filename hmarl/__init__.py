@@ -7,6 +7,7 @@ Package structure:
     hmarl.reward       – Reward shaping (FAI, PPR, RCI)
     hmarl.rci          – Role Coherence Index computation
     hmarl.metrics      – Evaluation metrics suite
+    hmarl.utils        – Shared utilities (seed, obs extraction, checkpointing, progress)
     hmarl.ippo         – Independent PPO baseline
     hmarl.shppo        – Shared PPO baseline (pooled experience)
     hmarl.mappo        – MAPPO baseline (centralized critic)

@@ -583,66 +583,106 @@ def plot_action_distribution(
 # 7. Macro Strategy Duration (Timeline)
 # ---------------------------------------------------------------------------
 def plot_macro_strategy_timeline(
-    strategies: List[int],
+    strategies,
     output_path: str,
     title: str = 'Macro Strategy Timeline',
+    window: int = 100,
 ):
-    """Timeline visualization of macro strategy activation over match duration.
+    r"""Timeline visualization of macro strategy activation over match duration.
+
+    Accepts a single episode (List[int]) or multiple episodes
+    (List[List[int]]).  Multi-episode: stacked area of dominant strategy
+    proportion per timestep, averaged across episodes with rolling window.
 
     Args:
-        strategies: list of strategy indices (0=High Pressing, 1=Counter, 2=Possession)
+        strategies: single episode list of strategy indices, OR list of
+                    per-episode strategy lists (each inner list = one episode).
         output_path: path to save
         title: plot title
+        window: rolling window for multi-episode averaging (default 100)
     """
     _apply_style()
-
     if not strategies:
         print('No strategy data for timeline plot')
         return
 
-    fig, ax = plt.subplots(figsize=(12, 2.5))
+    strategy_labels = ['High Pressing', 'Counter Attack', 'Possession Play']
+    strategy_colors = ['#2c3e50', '#3498db', '#2ecc71']
+    num_strategies = len(strategy_labels)
 
-    strategies = np.array(strategies)
-    t = np.arange(len(strategies))
+    # --- Detect single vs multi episode ---
+    is_multi = (
+        isinstance(strategies[0], (list, np.ndarray))
+        and len(strategies) > 1
+    )
 
-    # Color-coded timeline using imshow
-    cmap = plt.cm.colors.ListedColormap(['#2c3e50', '#3498db', '#2ecc71'])
-    ax.imshow(strategies.reshape(1, -1), aspect='auto', cmap=cmap,
-             interpolation='nearest', extent=[0, len(strategies), 0, 1])
+    if is_multi:
+        # Pad episodes to equal length, then build (N_episodes, T) array
+        max_len = max(len(ep) for ep in strategies)
+        arr = np.full((len(strategies), max_len), -1, dtype=float)
+        for i, ep in enumerate(strategies):
+            arr[i, :len(ep)] = np.array(ep, dtype=float)
 
-    # Legend
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#2c3e50', label='High Pressing'),
-        Patch(facecolor='#3498db', label='Counter Attack'),
-        Patch(facecolor='#2ecc71', label='Possession Play'),
-    ]
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=8,
-             frameon=True, framealpha=0.9)
+        T = max_len
+        if T < window:
+            window = max(1, T // 4)
+        x = np.arange(window - 1, T)
+        proportions = np.zeros((num_strategies, len(x)))
+        for s in range(num_strategies):
+            indicator = (arr == s).astype(float)
+            # Average across episodes first, then rolling mean on 1D
+            mean_indicator = indicator.mean(axis=0)  # (T,)
+            proportions[s] = _rolling_mean(mean_indicator, window)
+
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.stackplot(x, proportions * 100, labels=strategy_labels,
+                     colors=strategy_colors, alpha=0.85)
+        ax.set_ylim(0, 100)
+        ax.set_ylabel('Strategy Dominance (%)')
+        ax.set_title(title + '  (n=%d eps, w=%d)' % (len(strategies), window))
+        ax.legend(loc='upper right', fontsize=8, frameon=True, framealpha=0.9)
+    else:
+        # Single episode --- original color-coded timeline
+        strategies = np.array(strategies)
+        fig, ax = plt.subplots(figsize=(12, 2.5))
+        cmap = plt.cm.colors.ListedColormap(strategy_colors)
+        ax.imshow(strategies.reshape(1, -1), aspect='auto', cmap=cmap,
+                 interpolation='nearest', extent=[0, len(strategies), 0, 1])
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=c, label=l)
+            for c, l in zip(strategy_colors, strategy_labels)
+        ]
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=8,
+                 frameon=True, framealpha=0.9)
+        ax.set_yticks([])
+        ax.set_title(title)
 
     ax.set_xlabel('Timestep')
-    ax.set_yticks([])
-    ax.set_title(title)
-
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
-    print(f'Saved: {output_path}')
+    print('Saved: %s' % output_path)
 
 
 # ---------------------------------------------------------------------------
 # 8. Team Compactness Over Time
 # ---------------------------------------------------------------------------
 def plot_compactness_over_time(
-    data: Dict[str, List[float]],
+    data: Dict[str, Any],
     output_path: str,
     window: int = 100,
     title: str = 'Team Compactness Over Time',
 ):
-    """Line plot: team compactness ρ_tc(t) across match duration.
+    r"""Line plot: team compactness rho_tc(t) across match duration.
+
+    Accepts per-model data as either:
+      - List[float]        (single episode, backward-compatible)
+      - List[List[float]]  (multiple episodes: mean +/- std band)
 
     Args:
-        data: dict mapping model_name -> list of compactness values per timestep
+        data: dict mapping model_name -> compactness values
+              (single list OR list of per-episode lists)
         output_path: path to save
         window: smoothing window
         title: plot title
@@ -653,24 +693,57 @@ def plot_compactness_over_time(
     color_keys = list(COLORS.keys())
     for idx, (model, values) in enumerate(data.items()):
         color = COLORS[color_keys[idx % len(color_keys)]]
-        timesteps = np.arange(len(values))
 
-        if len(values) >= window:
-            smoothed = _rolling_mean(values, window)
-            x = timesteps[window - 1:]
-            ax.plot(x, smoothed, color=color, label=model, linewidth=1.2)
+        # --- Detect single vs multi episode ---
+        is_multi = (
+            isinstance(values, (list, np.ndarray))
+            and len(values) > 0
+            and isinstance(values[0], (list, np.ndarray))
+        )
+
+        if is_multi:
+            # Pad episodes to equal length
+            max_len = max(len(ep) for ep in values)
+            arr = np.full((len(values), max_len), np.nan, dtype=float)
+            for i, ep in enumerate(values):
+                arr[i, :len(ep)] = np.array(ep, dtype=float)
+
+            mean_ts = np.nanmean(arr, axis=0)
+            std_ts  = np.nanstd(arr, axis=0)
+
+            timesteps = np.arange(max_len)
+            if max_len >= window:
+                mean_sm = _rolling_mean(mean_ts, window)
+                std_sm  = _rolling_mean(std_ts, window)
+                x = timesteps[window - 1:]
+                ax.fill_between(x, mean_sm - std_sm, mean_sm + std_sm,
+                                color=color, alpha=0.15)
+                ax.plot(x, mean_sm, color=color, label=model, linewidth=1.2)
+            else:
+                ax.fill_between(timesteps, mean_ts - std_ts, mean_ts + std_ts,
+                                color=color, alpha=0.15)
+                ax.plot(timesteps, mean_ts, color=color, label=model,
+                        linewidth=1.2)
         else:
-            ax.plot(timesteps, values, color=color, label=model, linewidth=1.2)
+            # Single episode (original behavior)
+            timesteps = np.arange(len(values))
+            if len(values) >= window:
+                smoothed = _rolling_mean(values, window)
+                x = timesteps[window - 1:]
+                ax.plot(x, smoothed, color=color, label=model, linewidth=1.2)
+            else:
+                ax.plot(timesteps, values, color=color, label=model,
+                        linewidth=1.2)
 
     ax.set_xlabel('Timestep')
-    ax.set_ylabel(r'Team Compactness ($\rho_{tc}$)')
+    ax.set_ylabel('Team Compactness (rho_tc)')
     ax.set_title(title)
     ax.legend(frameon=True, framealpha=0.9, edgecolor='gray')
 
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
-    print(f'Saved: {output_path}')
+    print('Saved: %s' % output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -723,64 +796,107 @@ def plot_ablation_study(
 # 10. Tactic Transition Sankey (simplified as stacked area)
 # ---------------------------------------------------------------------------
 def plot_tactic_transitions(
-    macro_strategies: List[int],
-    sub_goals_per_agent: List[List[int]],
+    macro_strategies,
+    sub_goals_per_agent,
     output_path: str,
     title: str = 'Tactic Transition Overview',
+    window: int = 200,
 ):
-    """Simplified Sankey: stacked area of sub-goal frequency over time.
+    r"""Stacked area of sub-goal frequency over time.
+
+    Accepts single episode (flat lists) or multiple episodes (list of lists).
+    Multi-episode: frequency matrix computed per episode then averaged.
 
     Args:
-        macro_strategies: list of macro strategy indices per timestep
-        sub_goals_per_agent: list of sub-goal lists per timestep
+        macro_strategies: single-episode list of strategy indices per timestep,
+                          OR list of per-episode strategy lists.
+        sub_goals_per_agent: single-episode list of sub-goal lists per timestep,
+                             OR list of per-episode sub-goal lists.
         output_path: path to save
         title: plot title
+        window: aggregation window in timesteps (default 200)
     """
     _apply_style()
-
     if not sub_goals_per_agent:
         print('No sub-goal data for tactic transitions')
         return
 
     num_subgoals = 5
-    window = 200  # Aggregate over windows
-
-    # Count sub-goal frequency per window
-    n_windows = max(1, len(sub_goals_per_agent) // window)
-    freq_matrix = np.zeros((n_windows, num_subgoals))
-
-    for w in range(n_windows):
-        start = w * window
-        end = min(start + window, len(sub_goals_per_agent))
-        for t in range(start, end):
-            for sg in sub_goals_per_agent[t]:
-                if 0 <= sg < num_subgoals:
-                    freq_matrix[w, sg] += 1
-
-    # Normalize rows
-    row_sums = freq_matrix.sum(axis=1, keepdims=True)
-    row_sums[row_sums == 0] = 1
-    freq_matrix = freq_matrix / row_sums * 100
-
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-
-    x = np.arange(n_windows) * window
     subgoal_names = ['Zonal\nMarking', 'Build-up', 'Wing\nAttack',
                      'Man\nMarking', 'Clearance']
     colors = ['#2c3e50', '#3498db', '#2ecc71', '#e74c3c', '#f39c12']
 
-    ax.stackplot(x, freq_matrix.T, labels=subgoal_names, colors=colors, alpha=0.85)
+    # --- Detect single vs multi episode ---
+    # Single: sub_goals_per_agent[0] is a list of ints (one timestep's sub-goals)
+    # Multi:  sub_goals_per_agent[0] is a list of lists (one episode's timesteps)
+    first = sub_goals_per_agent[0]
+    is_multi = (
+        isinstance(first, (list, np.ndarray))
+        and len(first) > 0
+        and isinstance(first[0], (list, np.ndarray))
+    )
+
+    if is_multi:
+        # Pad episodes to equal length
+        max_len = max(len(ep) for ep in sub_goals_per_agent)
+        n_eps = len(sub_goals_per_agent)
+        n_windows = max(1, max_len // window)
+
+        # Accumulate frequency matrices across episodes
+        freq_matrix = np.zeros((n_windows, num_subgoals))
+        for ep in sub_goals_per_agent:
+            ep_arr = ep
+            for w in range(n_windows):
+                start = w * window
+                end = min(start + window, len(ep_arr))
+                for t in range(start, end):
+                    for sg in ep_arr[t]:
+                        if 0 <= sg < num_subgoals:
+                            freq_matrix[w, sg] += 1
+
+        # Average across episodes, then normalize rows
+        freq_matrix = freq_matrix / n_eps
+        row_sums = freq_matrix.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        freq_matrix = freq_matrix / row_sums * 100
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        x = np.arange(n_windows) * window
+        ax.stackplot(x, freq_matrix.T, labels=subgoal_names,
+                     colors=colors, alpha=0.85)
+        ax.set_title(title + '  (n=%d eps, w=%d)' % (n_eps, window))
+    else:
+        # Single episode --- original behavior
+        sga_flat = sub_goals_per_agent
+
+        n_windows = max(1, len(sga_flat) // window)
+        freq_matrix = np.zeros((n_windows, num_subgoals))
+        for w in range(n_windows):
+            start = w * window
+            end = min(start + window, len(sga_flat))
+            for t in range(start, end):
+                for sg in sga_flat[t]:
+                    if 0 <= sg < num_subgoals:
+                        freq_matrix[w, sg] += 1
+
+        row_sums = freq_matrix.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        freq_matrix = freq_matrix / row_sums * 100
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        x = np.arange(n_windows) * window
+        ax.stackplot(x, freq_matrix.T, labels=subgoal_names,
+                     colors=colors, alpha=0.85)
+        ax.set_title(title)
 
     ax.set_xlabel('Timestep')
     ax.set_ylabel('Sub-Goal Frequency (%)')
-    ax.set_title(title)
     ax.legend(loc='upper right', fontsize=8, frameon=True, framealpha=0.9)
     ax.set_ylim(0, 100)
-
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
-    print(f'Saved: {output_path}')
+    print('Saved: %s' % output_path)
 
 
 # ---------------------------------------------------------------------------

@@ -9,5 +9,14 @@ setup(
     install_requires=[
         "torch",
         "numpy",
+        "matplotlib",
+        "mplsoccer",
+        "stable_baselines3",
+        "gymnasium",
+        "optuna",
+        "scipy",
+        "psutil",
+        "requests",
+        "dataclasses",
     ],
 )

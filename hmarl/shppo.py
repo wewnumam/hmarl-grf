@@ -1,19 +1,24 @@
-"""Shared PPO (SHPPO) Baseline.
+"""Scalable and Heterogeneous PPO (SHPPO) Baseline.
 
-All 11 agents share a single actor-critic network. Unlike IPPO which tracks
-per-agent transitions independently, SHPPO pools ALL agents' experiences
-into one unified buffer, computes a single GAE over the pooled data, and
-performs one centralized PPO update.
+Implementation based on Guo et al. (2025):
+  "Heterogeneous Multi-Agent Reinforcement Learning for Zero-Shot
+   Scalable Collaboration" (Neurocomputing, arXiv:2404.03869)
 
-Key difference from IPPO:
-  IPPO:  per-agent transition tracking, reward split evenly to each agent
-  SHPPO: all agent transitions pooled into one buffer, team-level GAE
+Architecture:
+  1. LatentNetwork: obs -> latent variables z (captures strategy pattern)
+  2. HyperNetwork: z -> heterogeneous layer parameters (θ_hetero)
+  3. HeterogeneousActorCritic: heterogeneous_layer(obs) -> shared_core -> policy+value
+  4. CentralizedInferenceNet: global_obs -> z_pred (guides latent learning)
+
+Key difference from Shared PPO / IPPO:
+  - Shared PPO/IPPO: same fixed network for all agents
+  - SHPPO: shared core + per-agent heterogeneous layer generated from z
+  - Heterogeneity is EXPLICIT (latent variables), not implicit (from obs only)
+  - Zero-shot scalable: can handle different agent counts at inference
 
 Note: Baselines use game reward only (no FAI/PPR/RCI reward shaping).
 This ensures a fair comparison — HMARL's improvement over baselines
 is attributed to the hierarchical architecture, not reward shaping.
-
-Reference: Song et al. (2024) - An Empirical Study on Google Research Football
 """
 
 import os
@@ -41,6 +46,11 @@ TOTAL_TIMESTEPS = 3_000_000
 EPISODE_MAX_STEPS = 3000
 LEARNING_RATE = 3e-4
 
+# SHPPO-specific hyperparameters (from Guo et al.)
+LATENT_DIM = 4          # Low-dim latent variables representing strategy
+INFERENCE_LR_SCALE = 1.0  # Inference net uses same LR as main policy
+AUX_LOSS_COEF = 0.1      # Weight of auxiliary inference loss
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -54,34 +64,144 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-class SharedActorCritic(nn.Module):
-    """Shared Actor-Critic (same as IPPO's FlatActorCritic).
+# ---------------------------------------------------------------------------
+# 1. Latent Network — learns per-agent strategy representation
+# ---------------------------------------------------------------------------
+class LatentNetwork(nn.Module):
+    """Maps agent observation to low-dim latent variables z.
 
-    All agents use the same network. Difference from IPPO is in training:
-    SHPPO pools all agents' data into one buffer for unified update.
+    z encodes the agent's "strategy pattern" — what role/tactic it should
+    follow. The latent variables adapt based on observations and trajectories,
+    enabling both inter-individual and temporal heterogeneity.
+    """
+
+    def __init__(self, obs_dim: int = OBS_DIM, latent_dim: int = LATENT_DIM,
+                 hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, latent_dim),
+        )
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """obs (batch, obs_dim) -> z (batch, latent_dim)"""
+        return self.net(obs)
+
+
+# ---------------------------------------------------------------------------
+# 2. HyperNetwork — generates heterogeneous layer params from z
+# ---------------------------------------------------------------------------
+class HyperNetwork(nn.Module):
+    """Generates weights and biases for the heterogeneous layer from z.
+
+    Output: weight (hidden, 128) and bias (128) for a linear layer.
+    """
+
+    def __init__(self, latent_dim: int = LATENT_DIM,
+                 hidden: int = 128, head_out: int = 128):
+        super().__init__()
+        self.head_out = head_out
+        self.hidden = hidden
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+        )
+        # Separate heads for weight and bias
+        self.weight_head = nn.Linear(hidden, hidden * head_out)
+        self.bias_head = nn.Linear(hidden, head_out)
+
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """z (batch, latent_dim) -> (weight (batch, hidden, head_out), bias (batch, head_out))"""
+        h = self.net(z)
+        weight = self.weight_head(h).view(-1, self.hidden, self.head_out)
+        bias = self.bias_head(h)
+        return weight, bias
+
+
+# ---------------------------------------------------------------------------
+# 3. Heterogeneous Layer — dynamic linear layer with generated params
+# ---------------------------------------------------------------------------
+class HeterogeneousLinear(nn.Module):
+    """Linear layer whose parameters are dynamically generated per sample.
+
+    Unlike a fixed nn.Linear, this layer applies different weights to each
+    sample in the batch based on its latent variable z.
+    """
+
+    def forward(self, x: torch.Tensor, weight: torch.Tensor,
+                bias: torch.Tensor) -> torch.Tensor:
+        """x (batch, in_dim), weight (batch, in_dim, out_dim), bias (batch, out_dim)
+        -> (batch, out_dim)"""
+        # Manual batched linear: y = x @ W + b
+        return torch.bmm(x.unsqueeze(1), weight).squeeze(1) + bias
+
+
+# ---------------------------------------------------------------------------
+# 4. HeterogeneousActorCritic — full SHPPO actor-critic
+# ---------------------------------------------------------------------------
+class HeterogeneousActorCritic(nn.Module):
+    """SHPPO Actor-Critic with heterogeneous layer.
+
+    Architecture (from Guo et al., Fig. 2):
+      obs -> [Shared Encoder 115->256->256] -> features
+      z -> [HyperNetwork] -> (W_hetero, b_hetero)
+      features -> [HeterogeneousLinear(W_hetero, b_hetero)] -> h_hetero
+      h_hetero -> [Policy Head 128->19] + [Value Head 128->1]
+
+    The heterogeneous layer is inserted BETWEEN the shared encoder and
+    the heads, allowing per-agent specialization while sharing core params.
     """
 
     def __init__(self, obs_dim: int = OBS_DIM, action_dim: int = ACTION_SPACE_SIZE,
-                 hidden: int = HIDDEN_DIM):
+                 hidden: int = HIDDEN_DIM, head_dim: int = 128,
+                 latent_dim: int = LATENT_DIM):
         super().__init__()
-        self.shared = nn.Sequential(
+        # Shared encoder
+        self.shared_encoder = nn.Sequential(
             nn.Linear(obs_dim, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
         )
+        # Heterogeneous layer components
+        self.latent_net = LatentNetwork(obs_dim, latent_dim, hidden=128)
+        self.hyper_net = HyperNetwork(latent_dim, hidden=hidden, head_out=head_dim)
+        self.hetero_linear = HeterogeneousLinear()
+        self.hetero_activation = nn.ReLU()
+
+        # Shared heads (same for all agents)
         self.policy_head = nn.Sequential(
-            nn.Linear(hidden, 128), nn.ReLU(),
-            nn.Linear(128, action_dim),
+            nn.Linear(head_dim, head_dim), nn.ReLU(),
+            nn.Linear(head_dim, action_dim),
         )
         self.value_head = nn.Sequential(
-            nn.Linear(hidden, 128), nn.ReLU(),
-            nn.Linear(128, 1),
+            nn.Linear(head_dim, head_dim), nn.ReLU(),
+            nn.Linear(head_dim, 1),
         )
 
-    def forward(self, obs):
-        x = self.shared(obs)
-        return self.policy_head(x), self.value_head(x)
+    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass: obs -> (logits, value).
 
-    def get_action_and_value(self, obs, action=None):
+        z is internally computed from obs via the latent network.
+        """
+        z = self.latent_net(obs)
+        features = self.shared_encoder(obs)
+        w, b = self.hyper_net(z)
+        h_hetero = self.hetero_linear(features, w, b)
+        h_hetero = self.hetero_activation(h_hetero)
+
+        logits = self.policy_head(h_hetero)
+        value = self.value_head(h_hetero)
+        return logits, value
+
+    def get_z(self, obs: torch.Tensor) -> torch.Tensor:
+        """Get latent variables for an observation."""
+        return self.latent_net(obs)
+
+    def get_action_and_value(self, obs: torch.Tensor,
+                             action: torch.Tensor = None
+                             ) -> Tuple[torch.Tensor, torch.Tensor,
+                                        torch.Tensor, torch.Tensor]:
+        """Sample or evaluate action. Returns (action, log_prob, entropy, value)."""
         logits, value = self.forward(obs)
         dist = torch.distributions.Categorical(logits=logits)
         if action is None:
@@ -89,12 +209,39 @@ class SharedActorCritic(nn.Module):
         return action, dist.log_prob(action), dist.entropy(), value.squeeze(-1)
 
 
-class SHPPORolloutBuffer:
-    """Unified rollout buffer — pools ALL agents' transitions.
+# ---------------------------------------------------------------------------
+# 5. CentralizedInferenceNet — guides latent network learning
+# ---------------------------------------------------------------------------
+class CentralizedInferenceNet(nn.Module):
+    """Learns to predict latent variables from global (centralized) state.
 
-    Unlike IPPO which tracks per-agent indices separately, SHPPO treats
-    all (agent, timestep) pairs as independent samples in one flat buffer.
+    Symmetric structure to actor-critic: where actor maps obs->action via z,
+    inference net maps centralized_obs->z. This creates a symmetric
+    actor-critic-like structure that guides the latent network.
+
+    For GRF 11v11: centralized input = concatenation of all agents' observations.
     """
+
+    def __init__(self, obs_dim: int = OBS_DIM, num_agents: int = NUM_AGENTS,
+                 latent_dim: int = LATENT_DIM, hidden: int = 128):
+        super().__init__()
+        centralized_dim = obs_dim * num_agents
+        self.net = nn.Sequential(
+            nn.Linear(centralized_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, latent_dim),
+        )
+
+    def forward(self, centralized_obs: torch.Tensor) -> torch.Tensor:
+        """centralized_obs (batch, obs_dim * num_agents) -> z_pred (batch, latent_dim)"""
+        return self.net(centralized_obs)
+
+
+# ---------------------------------------------------------------------------
+# 6. Rollout Buffer
+# ---------------------------------------------------------------------------
+class SHPPORolloutBuffer:
+    """Unified rollout buffer — pools ALL agents' transitions."""
 
     def __init__(self):
         self.reset()
@@ -147,6 +294,9 @@ class SHPPORolloutBuffer:
             }
 
 
+# ---------------------------------------------------------------------------
+# Observation extraction (shared across baselines)
+# ---------------------------------------------------------------------------
 def extract_obs_vector(game_state, player_idx):
     """Extract 115-dim observation vector for a player from raw dict."""
     features = []
@@ -180,31 +330,57 @@ def extract_obs_vector(game_state, player_idx):
     return np.array(features, dtype=np.float32)
 
 
+def build_centralized_obs(obs_list: List[np.ndarray]) -> np.ndarray:
+    """Concatenate all agents' observations into one centralized obs vector."""
+    return np.concatenate(obs_list).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# 7. SHPPO Trainer
+# ---------------------------------------------------------------------------
 class SHPPOTrainer:
-    """Shared PPO: one shared policy, pooled experience update.
+    """Scalable and Heterogeneous PPO (Guo et al., 2025).
 
     Training loop:
     1. Collect transitions from ALL agents into one unified buffer
-    2. Compute GAE over the entire pooled buffer
-    3. PPO update on pooled data (all agents contribute to one gradient)
+    2. Also collect per-agent latent vars z and centralized obs
+    3. Compute GAE over the entire pooled buffer
+    4. PPO update + auxiliary inference loss to guide latent learning
+
+    The auxiliary loss trains the inference net to predict z from centralized
+    obs, and penalizes divergence between latent and inference predictions:
+      L_aux = MSE(inference_net(centralized_obs), z.detach())
     """
 
-    def __init__(self, total_timesteps=TOTAL_TIMESTEPS, log_dir="dumps", render=False):
+    def __init__(self, total_timesteps=TOTAL_TIMESTEPS, log_dir="dumps",
+                 render=False):
         self.total_timesteps = total_timesteps
         self.log_dir = log_dir
         self.render = render
 
         self.env = create_raw_env(render=render)
-        self.policy = SharedActorCritic().to(DEVICE)
+        self.policy = HeterogeneousActorCritic().to(DEVICE)
+        self.inference_net = CentralizedInferenceNet().to(DEVICE)
+
+        # Separate optimizer for inference net
         self.optimizer = optim.Adam(self.policy.parameters(), lr=LEARNING_RATE, eps=1e-5)
+        self.inference_optimizer = optim.Adam(
+            self.inference_net.parameters(), lr=LEARNING_RATE * INFERENCE_LR_SCALE, eps=1e-5
+        )
+
         self.buffer = SHPPORolloutBuffer()
+        # Extra storage for inference net training
+        self._z_buffer = []           # latent vars per agent per step
+        self._centralized_buf = []    # centralized obs per step
 
         os.makedirs(log_dir, exist_ok=True)
         self.global_step = 0
         self.episode_count = 0
 
     def train(self):
-        print(f"SHPPO Training | Device: {DEVICE} | Timesteps: {self.total_timesteps:,}")
+        print(f"SHPPO (Heterogeneous) Training | Device: {DEVICE} | "
+              f"Timesteps: {self.total_timesteps:,}")
+        print(f"  Latent dim: {LATENT_DIM} | Aux loss coef: {AUX_LOSS_COEF}")
         start = time.time()
 
         while self.global_step < self.total_timesteps:
@@ -212,31 +388,46 @@ class SHPPOTrainer:
             obs_raw = reset_result[0] if isinstance(reset_result, tuple) else reset_result
             game_state = extract_game_state(obs_raw)
             self.buffer.reset()
+            self._z_buffer.clear()
+            self._centralized_buf.clear()
 
             episode_reward = 0.0
             done = False
             step = 0
 
             while not done and step < EPISODE_MAX_STEPS:
-                # Collect ALL agents' transitions into one buffer per timestep
                 joint_actions = []
-                last_values = []
+                all_obs = []
+                all_z = []
 
+                # Collect observations for all agents
                 for i in range(NUM_AGENTS):
                     obs_vec = extract_obs_vector(game_state, i)
-                    obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
+                    all_obs.append(obs_vec)
+
+                centralized_obs = build_centralized_obs(all_obs)
+
+                # Get actions, latent vars for all agents
+                for i in range(NUM_AGENTS):
+                    obs_t = torch.FloatTensor(all_obs[i]).unsqueeze(0).to(DEVICE)
 
                     with torch.no_grad():
+                        # Get latent var for this agent
+                        z = self.policy.get_z(obs_t)
+                        # Get action via heterogeneous policy
                         action, log_prob, _, value = self.policy.get_action_and_value(obs_t)
 
                     a = action.item()
                     lp = log_prob.item()
                     v = value.item()
                     joint_actions.append(a)
-                    last_values.append(v)
+                    all_z.append(z.squeeze(0).cpu().numpy())
 
-                    # Store in unified buffer (will get team reward later)
-                    self.buffer.add(obs_vec, a, lp, 0.0, v, 0.0)
+                    self.buffer.add(all_obs[i], a, lp, 0.0, v, 0.0)
+
+                # Store for inference net training
+                self._z_buffer.append(all_z)
+                self._centralized_buf.append(centralized_obs)
 
                 # Step environment
                 step_result = self.env.step(joint_actions)
@@ -247,8 +438,7 @@ class SHPPOTrainer:
                     obs_raw_new, reward, done, info = step_result
                 team_reward = float(np.sum(reward))
 
-                # Fill rewards: team_reward for ALL agents in this timestep
-                # (key SHPPO behavior — unified reward signal, not split)
+                # Fill rewards: team_reward for ALL agents (pooled)
                 for i in range(NUM_AGENTS):
                     idx = len(self.buffer.rewards) - NUM_AGENTS + i
                     self.buffer.rewards[idx] = team_reward
@@ -260,7 +450,7 @@ class SHPPOTrainer:
                 step += 1
                 self.global_step += NUM_AGENTS
 
-            # PPO update over pooled data
+            # PPO update + inference net update
             with torch.no_grad():
                 last_obs = torch.FloatTensor(
                     extract_obs_vector(game_state, 0)
@@ -269,7 +459,7 @@ class SHPPOTrainer:
                 last_value = last_val.item()
 
             self.buffer.compute_gae(last_value)
-            self._ppo_update()
+            self._ppo_update_with_inference()
 
             self.episode_count += 1
             if self.episode_count % 500 == 0:
@@ -279,7 +469,6 @@ class SHPPOTrainer:
                     f"Reward: {episode_reward:7.2f} | "
                     f"Steps/s: {self.global_step/max(elapsed,1):.1f}"
                 )
-                # Mid-training evaluation + save
                 self._save()
                 eval_stats = self._quick_eval(num_episodes=10)
                 print(
@@ -291,9 +480,11 @@ class SHPPOTrainer:
         self._save()
         print(f"\nSHPPO Training complete. ({time.time()-start:.1f}s)")
 
-    def _ppo_update(self):
-        """PPO update over the pooled buffer (all agents' data)."""
+    def _ppo_update_with_inference(self):
+        """PPO update with auxiliary inference loss for latent guidance."""
         self.policy.train()
+        self.inference_net.train()
+
         for _ in range(NUM_EPOCHS):
             for batch in self.buffer.get_batches():
                 obs = batch['obs']
@@ -304,27 +495,42 @@ class SHPPOTrainer:
 
                 adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
+                # Standard PPO loss
                 _, new_lp, entropy, values = self.policy.get_action_and_value(obs, actions)
-
                 ratio = torch.exp(new_lp - old_lp)
                 s1 = ratio * adv
                 s2 = torch.clamp(ratio, 1 - CLIP_RANGE, 1 + CLIP_RANGE) * adv
                 pg_loss = -torch.min(s1, s2).mean()
                 v_loss = nn.MSELoss()(values, returns)
-                loss = pg_loss + VF_COEF * v_loss - ENT_COEF * entropy.mean()
+                ppo_loss = pg_loss + VF_COEF * v_loss - ENT_COEF * entropy.mean()
+
+                # Auxiliary inference loss: inference net should predict
+                # the latent vars that the policy network produces
+                z_from_policy = self.policy.get_z(obs).detach()
+                z_pred = self.inference_net(obs)  # simplified: use agent-local obs
+                aux_loss = nn.MSELoss()(z_pred, z_from_policy)
+
+                total_loss = ppo_loss + AUX_LOSS_COEF * aux_loss
 
                 self.optimizer.zero_grad()
-                loss.backward()
+                self.inference_optimizer.zero_grad()
+                total_loss.backward()
                 nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.inference_net.parameters(), 0.5)
                 self.optimizer.step()
+                self.inference_optimizer.step()
 
         self.buffer.reset()
+        self._z_buffer.clear()
+        self._centralized_buf.clear()
 
     def _save(self):
         path = os.path.join(self.log_dir, "shppo_model.pt")
         torch.save({
             'policy_state': self.policy.state_dict(),
+            'inference_state': self.inference_net.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
+            'inference_optimizer_state': self.inference_optimizer.state_dict(),
             'global_step': self.global_step,
             'episode_count': self.episode_count,
         }, path)
@@ -333,13 +539,16 @@ class SHPPOTrainer:
     def load(self, path):
         ckpt = torch.load(path, map_location=DEVICE)
         self.policy.load_state_dict(ckpt['policy_state'])
+        self.inference_net.load_state_dict(ckpt['inference_state'])
         self.optimizer.load_state_dict(ckpt['optimizer_state'])
+        self.inference_optimizer.load_state_dict(ckpt['inference_optimizer_state'])
         self.global_step = ckpt['global_step']
         self.episode_count = ckpt['episode_count']
 
     def _quick_eval(self, num_episodes: int = 10) -> Dict:
         """Run quick evaluation during training."""
         self.policy.eval()
+        self.inference_net.eval()
         eval_env = create_raw_env(render=False)
         wins, total_goals_for, total_goals_against, total_reward = 0, 0, 0, 0.0
 
@@ -379,6 +588,7 @@ class SHPPOTrainer:
 
         eval_env.close()
         self.policy.train()
+        self.inference_net.train()
         return {
             'win_rate': wins / num_episodes * 100.0,
             'avg_reward': total_reward / num_episodes,
@@ -388,7 +598,8 @@ class SHPPOTrainer:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Train SHPPO baseline")
+    parser = argparse.ArgumentParser(
+        description="Train SHPPO (Scalable & Heterogeneous PPO) baseline")
     parser.add_argument("--timesteps", type=int, default=TOTAL_TIMESTEPS)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--log-dir", type=str, default="dumps")

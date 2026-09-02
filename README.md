@@ -11,6 +11,7 @@ hmarl-grf/
 ├── hmarl/                        # Core package
 │   ├── __init__.py
 │   ├── env.py                    # GRF environment wrapper + state extraction
+│   ├── utils.py                  # Shared utilities (seed, obs extraction, checkpointing, progress)
 │   ├── policy.py                 # Hierarchical policy (High/Mid/Low-level)
 │   ├── expert.py                 # Rule-based expert policy (RCI oracle)
 │   ├── reward.py                 # Reward shaping (FAI, PPR, RCI components)
@@ -22,6 +23,7 @@ hmarl-grf/
 ├── scripts/
 │   ├── train.py                  # HMARL training + checkpoint + mid-train eval
 │   ├── eval.py                   # HMARL evaluation + visualization
+│   ├── dry_run.py                # Dry run / smoke test (3-layer validation)
 │   ├── sweep.py                  # Optuna hyperparameter sweep
 │   ├── stat_test.py              # Multi-seed statistical significance testing
 │   └── ablation.py               # Ablation study (component contributions)
@@ -48,118 +50,91 @@ hmarl-grf/
 Standard RL research pipeline — all paths relative to project root.
 
 ```mermaid
-flowchart TD
-    subgraph Entry["Entry Points (CLI)"]
-        T["scripts/train.py<br/>HMARL training"]
-        E["scripts/eval.py<br/>Evaluation + visualization"]
-        SW["scripts/sweep.py<br/>Optuna hyperparameter sweep"]
-        ST["scripts/stat_test.py<br/>Multi-seed statistical testing"]
-        AB["scripts/ablation.py<br/>Ablation study"]
+flowchart LR
+    %% === TRAINING PIPELINE ===
+    subgraph TRAIN["Training Pipeline"]
+        direction TB
+        A1["train.py"] --> A2["GRF 11v11<br/>Environment"]
+        A1 --> A3["Hierarchical Policy<br/>High → Mid → Low"]
+        A1 --> A4["Expert Policy<br/>(rule-based)"]
+        A4 --> A5["Reward Shaping<br/>r = r_game + α·FAI + β·PPR + γ·RCI"]
+        A5 --> A6["PPO Update"]
+        A6 --> A7["Checkpoint<br/>hmarl_model.pt"]
+        A6 --> A8["Training Logs<br/>TensorBoard + JSON"]
     end
 
-    subgraph Core["Core Package (hmarl/)"]
-        ENV["env.py<br/>GRF environment wrapper<br/>+ state extraction"]
-        POL["policy.py<br/>Hierarchical policy<br/>High/Mid/Low-level"]
-        EXP["expert.py<br/>Rule-based expert<br/>(RCI oracle)"]
-        RW["reward.py<br/>Reward shaping<br/>FAI + PPR + RCI"]
-        RCI["rci.py<br/>Role Coherence<br/>Index metric"]
-        MET["metrics.py<br/>Evaluation metrics<br/>(12 metrics)"]
+    %% === EVALUATION PIPELINE ===
+    subgraph EVAL["Evaluation Pipeline"]
+        direction TB
+        B1["eval.py"] --> B2["Load Checkpoint"]
+        B2 --> B3["Run Episodes"]
+        B3 --> B4["Collect Metrics<br/>12 coordination + performance"]
+        B3 --> B5["Collect RCI<br/>strict + category"]
+        B4 --> B6["Plots & Reports<br/>evaluation_results/"]
+        B5 --> B6
     end
 
-    subgraph Baselines["Baselines"]
-        IPPO["hmarl/ippo.py<br/>Independent PPO"]
-        SHPPO["hmarl/shppo.py<br/>Shared PPO"]
-        MAPPO["hmarl/mappo.py<br/>MAPPO"]
-        SB3_A2C["baselines/11v11_a2c.py<br/>(Stable Baselines3)"]
-        SB3_PPO["baselines/11v11_ppo.py<br/>(Stable Baselines3)"]
-        SB3_RAND["baselines/11v11_random_action.py"]
+    %% === VALIDATION PIPELINE ===
+    subgraph VALID["RCI Validity Pipeline"]
+        direction TB
+        C1["validate_rci.py"] --> C2["Construct Validity<br/>Pearson correlation<br/>RCI ↔ FAI, Entropy, ..."]
+        C1 --> C3["Discrimination Validity<br/>One-sided t-test<br/>HMARL > IPPO > Random"]
+        C1 --> C4["Internal Consistency<br/>CV across seeds<br/>threshold: CV < 15%"]
+        C1 --> C5["Sensitivity Analysis<br/>±20% threshold<br/>d_tackle, d_safe, d_shoot"]
+        C2 --> C6["rci_validity.json"]
+        C3 --> C6
+        C4 --> C6
+        C5 --> C6
     end
 
-    subgraph GRF["Google Research Football"]
-        GENV["gfootball.env<br/>11_vs_11_stochastic"]
+    %% === BASELINES ===
+    subgraph BASE["Baselines"]
+        direction TB
+        D1["IPPO"] & D2["SHPPO"] & D3["MAPPO"] --> D4["GRF 11v11"]
+        D4 --> D5["Flat Policies"]
     end
 
-    subgraph Outputs["Artifacts"]
-        CKPT["checkpoints/<br/>hmarl_model.pt"]
-        DUMPS["dumps/<br/>episode .dump files<br/>+ training_log.json"]
-        TB["dumps/hmarl_runs/<br/>TensorBoard logs"]
-        ER["evaluation_results/<br/>*.json + plots/"]
-        SR["sweep_results/<br/>best_params.json"]
+    %% === STAT & ABLATION ===
+    subgraph STAT["Statistical Testing"]
+        direction TB
+        E1["stat_test.py"] --> E2["N seeds × train"]
+        E2 --> E3["N seeds × eval"]
+        E3 --> E4["Mann-Whitney U<br/>HMARL > baseline"]
+        E4 --> E5["stat_test_results.json"]
     end
 
-    subgraph DumpUtils["Dump Utilities"]
-        REPLAY["dumps/replay.py<br/>Replay .dump files"]
-        CONV["dumps/convert_txt_to_json.py<br/>Dump → JSON"]
+    subgraph ABLAT["Ablation Study"]
+        direction TB
+        F1["ablation.py"] --> F2["no_fai / no_ppr /<br/>no_rci / no_shaping"]
+        F2 --> F3["Compare Δ performance<br/>+ Δ coordination metrics"]
+        F3 --> F4["ablation_results.json"]
     end
 
-    %% Training flow
-    T --> ENV
-    T --> POL
-    T --> EXP
-    T --> RW
-    T --> RCI
-    T --> MET
-    ENV --> GENV
-    RW --> RCI
-    RW --> EXP
-    T --> CKPT
-    T --> DUMPS
-    T --> TB
-
-    %% Baseline training flow
-    IPPO --> ENV
-    SHPPO --> ENV
-    MAPPO --> ENV
-    IPPO -->|"dumps/ippo_model.pt"| DUMPS
-    SHPPO -->|"dumps/shppo_model.pt"| DUMPS
-    MAPPO -->|"dumps/mappo_model.pt"| DUMPS
-
-    SB3_A2C --> GENV
-    SB3_PPO --> GENV
-    SB3_RAND --> GENV
-
-    %% Evaluation flow
-    E --> ENV
-    E --> POL
-    E --> MET
-    E --> ER
-
-    %% Sweep flow
-    SW -->|"trials × train.py"| T
-    SW --> SR
-
-    %% Stat test flow
-    ST -->|"seeds × train.py"| T
-    ST -->|"seeds × eval.py"| E
-    ST --> ER
-
-    %% Ablation flow
-    AB --> ENV
-    AB --> POL
-    AB --> EXP
-    AB --> RW
-    AB --> MET
-    AB --> ER
-
-    %% Dump utilities
-    DUMPS --> REPLAY
-    DUMPS --> CONV
+    %% === CROSS-CONNECTIONS ===
+    A7 --> B2
+    A7 --> E2
+    D5 --> E3
+    A7 -.-> C1
+    A8 -.-> C1
+    B6 -.-> C1
+    E5 -.-> C1
 ```
 
 ### Script → Module Dependency Matrix
 
-| Script | env | policy | expert | reward | rci | metrics |
-|--------|:---:|:------:|:------:|:------:|:---:|:-------:|
-| `scripts/train.py` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `scripts/eval.py` | ✅ | ✅ | — | — | — | ✅ |
-| `scripts/sweep.py` | — | — | — | — | — | — |
-| `scripts/stat_test.py` | — | — | — | — | — | — |
-| `scripts/ablation.py` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `hmarl/ippo.py` | ✅ | — | — | — | — | — |
-| `hmarl/shppo.py` | ✅ | — | — | — | — | — |
-| `hmarl/mappo.py` | ✅ | — | — | — | — | — |
+| Script | utils | env | policy | expert | reward | rci | metrics |
+|--------|:-----:|:---:|:------:|:------:|:------:|:---:|:-------:|
+| `scripts/train.py` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `scripts/eval.py` | ✅ | ✅ | ✅ | — | — | — | ✅ |
+| `scripts/sweep.py` | ✅ | — | — | — | — | — | — |
+| `scripts/stat_test.py` | ✅ | — | — | — | — | — | ✅ |
+| `scripts/validate_rci.py` | ✅ | — | — | — | — | — | — |
+| `scripts/ablation.py` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `hmarl/ippo.py` | — | ✅ | — | — | — | — | — |
+| `hmarl/shppo.py` | — | ✅ | — | — | — | — | — |
+| `hmarl/mappo.py` | — | ✅ | — | — | — | — | — |
 
-`sweep.py` and `stat_test.py` orchestrate training/eval as subprocesses — no direct hmarl imports.
+`sweep.py` and `stat_test.py` orchestrate training/eval as subprocesses — minimal hmarl imports (shared utilities only).
 
 ## Algorithms
 
@@ -280,6 +255,41 @@ python scripts/train.py --dump-freq 0
 
 **Training log:** Per-episode metrics saved to `dumps/training_log.json` (rewards, RCI, FAI, PPR, compactness).
 
+## TensorBoard Monitoring
+
+TensorBoard logs are written to `dumps/hmarl_runs/` by `train.py`.
+
+**Logged metrics:**
+
+| Tag | Frequency | Description |
+|-----|-----------|-------------|
+| `loss/policy` | Per PPO update | Clipped surrogate policy loss |
+| `loss/value` | Per PPO update | Value function MSE loss |
+| `loss/entropy` | Per PPO update | Policy entropy bonus |
+| `reward/episode` | Per episode | Cumulative reward per episode |
+| `reward/avg_100` | Per episode | Rolling 100-episode average reward |
+| `training/episode_length` | Per episode | Timesteps per episode |
+| `eval/win_rate` | Every 500 episodes | Win rate during mid-training eval |
+| `eval/avg_reward` | Every 500 episodes | Average reward during mid-training eval |
+| `eval/goal_diff` | Every 500 episodes | Goal difference during mid-training eval |
+
+**Access from host:**
+```bash
+pip install tensorboard
+cd C:/1_projects/UGM/tesis/proposal/Source Code/hmarl-grf
+tensorboard --logdir=dumps/hmarl_runs
+# Open http://localhost:6006
+```
+
+**Access from container:**
+```bash
+docker exec -it gfootball-dev bash
+tensorboard --logdir=/gfootball/dumps/hmarl_runs --host=0.0.0.0
+# Open http://localhost:6006
+```
+
+Note: If `tensorboard` is not installed on the host, use the container method. The `dumps/` directory is bind-mounted, so logs written inside the container are accessible from both host and container.
+
 **Episode dumps:** GRF can write full episode dumps (`.dump` files) for replay and visualization. These are large (~12MB per episode), so training uses **selective dumping** — dumps are only written at specific intervals and auto-cleaned to keep storage bounded. See [Episode Dumps](#episode-dumps) for details.
 
 ### Baselines
@@ -315,6 +325,8 @@ python scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --episodes 100
 python scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --render
 ```
 
+**Checkpoint metadata:** When loading a checkpoint, `eval.py` displays reproducibility info: git hash, training hyperparameters, Python/Torch versions, and training timestamp (saved by `train.py` since the refactoring).
+
 **Metrics computed:**
 - **Performance**: Win Rate, Goal Difference, Cumulative Reward
 - **Coordination**: PSR, PPR, Positional Entropy, Team Compactness, FAI
@@ -324,6 +336,82 @@ python scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --render
 - `evaluation_results/hmarl_results.json` — aggregate metrics
 - `evaluation_results/hmarl_episodes.json` — per-episode breakdown
 - `evaluation_results/plots/` — role heatmap, formation snapshots, action distribution, strategy timeline, compactness plot
+
+## Dry Run (Smoke Test)
+
+Three-layer validation to catch issues before full training runs.
+
+| Layer | What it tests | Needs Docker? |
+|-------|---------------|---------------|
+| 1 | AST syntax check on all `.py` files | No |
+| 2 | Import all modules + unit tests (policy, reward, metrics, buffer) | Yes |
+| 3 | Full GRF integration: 1 episode, 50 steps, PPO backward pass | Yes |
+
+```bash
+# Quick: AST + components + mock pipeline (no GRF env)
+python scripts/dry_run.py
+
+# Full: includes actual GRF environment (50 steps)
+python scripts/dry_run.py --full
+
+# Host-only: syntax check only (no imports, no Docker)
+python scripts/dry_run.py --ast-only
+```
+
+**What it verifies:**
+- All 33 `.py` files parse without syntax errors
+- All `hmarl.*` modules import successfully
+- Policy forward/backward pass with correct shapes
+- Observation vector extraction (115-dim)
+- High/Mid-level policy logic (strategy + sub-goal)
+- Expert policy ideal actions per role
+- Reward computation (FAI + PPR + RCI)
+- Rollout buffer (add, GAE, mini-batch)
+- Action category mapping
+- Mock training loop: 50 steps, full PPO update
+
+**Example output:**
+```
+=== Layer 1: AST Syntax Check ===
+  All 33 .py files parse OK
+
+=== Layer 2: Component Unit Tests ===
+  PASS  import all modules
+  PASS  set_seed
+  PASS  policy forward pass
+  PASS  policy backward pass
+  PASS  extract_obs_vector
+  PASS  extract_game_state
+  PASS  high-level policy
+  PASS  mid-level policy
+  PASS  expert policy
+  PASS  reward computation
+  PASS  FAI computation
+  PASS  RCI computation
+  PASS  metrics
+  PASS  team_compactness
+  PASS  formation_adherence_index (metric)
+  PASS  rollout buffer
+  PASS  action category
+
+=== Layer 2b: Mock Pipeline (1 episode, 50 steps) ===
+    step 10/50 reward=0.342
+    step 20/50 reward=0.891
+    step 30/50 reward=1.456
+    step 40/50 reward=2.012
+    step 50/50 reward=2.678
+  PASS  PPO backward update (mock pipeline)
+  Mock pipeline: 50 steps in 1.23s (41 steps/s)
+
+=== Layer 3: GRF Integration (1 episode, 50 steps) ===
+  PASS  env.reset + extract_game_state
+  PASS  env.step full loop (50 steps)
+  PASS  GRF PPO backward (10 steps)
+
+============================================================
+  ALL 20 CHECKS PASSED
+============================================================
+```
 
 ## Plot Generation
 
@@ -390,6 +478,8 @@ python scripts/sweep.py --output my_sweep/best.json
 
 **Output:** `sweep_results/best_params.json`
 
+**Temp cleanup:** `sweep_temp/` directory cleaned up after completion.
+
 ## Statistical Significance Testing
 
 Runs each algorithm over N random seeds, computes mean ± std, and performs Mann-Whitney U test (one-sided: HMARL > baseline, α = 0.05).
@@ -410,10 +500,56 @@ python scripts/stat_test.py --seeds 5 --base-seed 100
 
 **Output:** `evaluation_results/stat_test_results.json`
 
+**Flat baseline metrics:** All algorithms (including IPPO, SHPPO, MAPPO, Random) now compute the full metrics suite (RCI, PSR, PPR, FAI, compactness, entropy, etc.) — not just win rate and reward. This enables apple-to-apple comparison across all metrics.
+
+**Progress tracking:** Displays live progress bar with ETA during seed loops and episode evaluation.
+
+**Temp cleanup:** Temporary directories (`stat_temp/`) are automatically cleaned up after completion.
+
 **Statistical tests performed:**
 - Mann-Whitney U test (one-sided, HMARL > each baseline)
 - Reports: U-statistic, p-value, significance (p < 0.05)
 - Gracefully skips if scipy not installed
+
+## RCI Validity Evaluation
+
+Evaluates Role Coherence Index (RCI) through three validity approaches matching the thesis methodology (BAB IV §Validitas Metrik RCI):
+
+1. **Construct Validity** — Pearson correlation between RCI and established metrics (FAI, Entropy, Compactness, PSR, PPR) with p-values
+2. **Discrimination Validity** — One-sided t-test: HMARL RCI > IPPO RCI > Random RCI (α = 0.05)
+3. **Internal Consistency** — Coefficient of Variation (CV) across seeds; CV < 15% = acceptable
+4. **Sensitivity Analysis** (optional) — RCI stability under expert policy threshold variations (±20% on d_tackle, d_safe, d_shoot)
+
+```bash
+# Full: 3 seeds, 3M steps, 100 eval episodes
+python scripts/validate_rci.py --seeds 3 --timesteps 3000000 --eval-episodes 100
+
+# Quick: 3 seeds, 100k steps, 10 eval episodes
+python scripts/validate_rci.py --quick
+
+# Load existing stat_test results (seed-level aggregates only)
+python scripts/validate_rci.py --load-results evaluation_results/stat_test_results.json
+
+# Include sensitivity analysis (requires trained model checkpoint)
+python scripts/validate_rci.py --sensitivity --model-path dumps/hmarl_model.pt
+
+# Test specific algorithms
+python scripts/validate_rci.py --algorithms hmarl ippo shppo random
+```
+
+**Output:** `evaluation_results/rci_validity.json`
+
+**Error handling:** Full tracebacks on failure (not just error messages). Imports consolidated to `hmarl.utils` (no more cross-script circular imports).
+
+**Dependencies:** `scipy` (for t-test and Pearson correlation). Skips gracefully if not installed.
+
+**Correlation pairs tested:**
+- RCI_cat ↔ FAI (expected: positive)
+- RCI_strict ↔ FAI (expected: positive)
+- RCI_cat ↔ Positional Entropy (expected: negative)
+- RCI_strict ↔ Positional Entropy (expected: negative)
+- RCI_cat ↔ Compactness (expected: negative)
+- RCI_cat ↔ PSR/PPR/Win Rate (expected: positive)
 
 ## Ablation Study
 
@@ -444,6 +580,10 @@ python scripts/ablation.py --seed 123 --timesteps 500000
 ```
 
 **Output:** `evaluation_results/ablation_results.json`
+
+**Progress tracking:** Live progress bar with ETA for the 7-config loop. Error tracebacks on failure.
+
+**Temp cleanup:** `ablation_temp/` directory cleaned up after completion.
 
 **Summary table example:**
 ```
@@ -486,6 +626,31 @@ python scripts/ablation.py --seed 123 --timesteps 500000
 | α_L | Role Coherence Index (RCI) | 0.01 |
 
 ## CLI Reference
+
+### Shared Utilities (`hmarl/utils.py`)
+
+Central module eliminating code duplication across scripts. All scripts import from this module instead of defining local copies.
+
+| Export | Description |
+|--------|-------------|
+| `set_seed(seed)` | Set random seeds (Python, NumPy, PyTorch) |
+| `extract_obs_vector(gs, idx, obs_dim=115)` | Extract fixed-length observation vector from GRF game state |
+| `load_hmarl_checkpoint(path, device)` | Load policy + subgoal_embedding + metadata from checkpoint |
+| `save_checkpoint(path, ...)` | Save checkpoint with reproducibility metadata (git hash, hyperparams, timestamps) |
+| `ProgressTracker(total, label)` | Live progress bar + ETA for loops |
+| `cleanup_temp_dirs(dirs)` | Remove temporary directories (`stat_temp/`, `ablation_temp/`, etc.) |
+| `get_git_hash()` | Best-effort git commit hash |
+| `OBS_DIM`, `HIDDEN_DIM`, `HEAD_DIM`, `ACTION_SPACE_SIZE`, `EPISODE_MAX_STEPS` | Shared constants (single source of truth) |
+
+### Reproducibility Metadata
+
+Checkpoints saved by `train.py` include:
+- `git_hash` — commit hash at training time
+- `python_version`, `torch_version` — runtime environment
+- `save_timestamp` — when the checkpoint was saved
+- `hyperparams` — all PPO hyperparameters used for training
+
+This metadata is displayed by `eval.py` when loading a checkpoint and stored in the JSON output.
 
 ### train.py
 

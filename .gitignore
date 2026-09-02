@@ -220,3 +220,13 @@ logs/
 dumps/*.dump
 dumps/*.avi
 dumps/*.png
+# Project-specific
+plots_output/
+evaluation_results/
+evaluation/output.json
+evaluation/output.*.json
+evaluation/output_*.json
+ppo_11v11_model.zip
+valid_temp
+dumps/training_log.json
+dumps/hmarl_runs

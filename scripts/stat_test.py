@@ -12,7 +12,7 @@ import argparse
 import json
 import os
 import sys
-import time
+import traceback
 from typing import Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,12 +21,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import torch
 
-from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state, ACTION_SPACE_SIZE
+from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
 from hmarl.expert import ExpertPolicyAllAgents
 from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
 from hmarl.metrics import compute_win_rate, compute_goal_difference, compute_all_metrics, print_metrics
 from hmarl.rci import compute_rci
+from hmarl.utils import (
+    set_seed, extract_obs_vector, OBS_DIM, HIDDEN_DIM, HEAD_DIM,
+    ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker,
+    cleanup_temp_dirs,
+)
 
 try:
     from scipy import stats
@@ -37,47 +42,7 @@ except ImportError:
     print("  Install with: pip install scipy")
 
 
-HIDDEN_DIM = 256
-HEAD_DIM = 128
-OBS_DIM = 115
-EPISODE_MAX_STEPS = 3000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def set_seed(seed: int):
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def extract_obs_vector(game_state, player_idx):
-    """Extract 115-dim observation vector."""
-    features = []
-    ball = game_state.get('ball', [0, 0, 0])
-    features.extend(ball)
-    features.extend(game_state.get('ball_direction', [0, 0, 0]))
-    features.extend(game_state.get('ball_rotation', [0, 0, 0]))
-    features.append(float(game_state.get('ball_owned_team', -1)))
-    features.append(float(game_state.get('ball_owned_player', -1)))
-    for i in range(11):
-        pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-        d = game_state.get('left_team_direction', [[0, 0]] * 11)[i] if 'left_team_direction' in game_state else [0, 0]
-        t = game_state.get('left_team_tired_factor', [0.0] * 11)[i] if 'left_team_tired_factor' in game_state else 0.0
-        y = game_state.get('left_team_yellow_card', [0] * 11)[i] if 'left_team_yellow_card' in game_state else 0
-        r = game_state.get('left_team_roles', [5] * 11)[i] if 'left_team_roles' in game_state else 5
-        features.append(1.0 if i == player_idx else 0.0)
-        features.extend(pos)
-        features.extend(d)
-        features.append(t)
-        features.append(float(y))
-        features.append(float(r))
-    features = features[:OBS_DIM]
-    while len(features) < OBS_DIM:
-        features.append(0.0)
-    return np.array(features, dtype=np.float32)
 
 
 def train_hmarl(timesteps: int, seed: int, output_dir: str) -> str:
@@ -210,57 +175,71 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
     """Evaluate flat baseline using SB3 or random policy."""
     set_seed(seed)
     env = create_raw_env(render=False)
-    controller = HierarchicalController()
-    expert = ExpertPolicyAllAgents()
 
-    # Load trained model
     model_path = f"dumps/{algorithm}_model.pt"
     if not os.path.exists(model_path):
         print(f"  WARNING: No model found at {model_path}. Running random.")
         algorithm = "random"
 
     if algorithm == "random":
+        env.close()
         return evaluate_random(num_episodes, seed)
 
-    # Load model and evaluate
-    set_seed(seed)
+    # Load model ONCE before episode loop
+    if algorithm == "ippo":
+        from hmarl.ippo import FlatActorCritic
+        model = FlatActorCritic().to(DEVICE)
+    elif algorithm == "shppo":
+        from hmarl.shppo import SharedActorCritic
+        model = SharedActorCritic().to(DEVICE)
+    elif algorithm == "mappo":
+        from hmarl.mappo import DecentralizedActor
+        model = DecentralizedActor().to(DEVICE)
+    else:
+        env.close()
+        return {}
+
+    ckpt = torch.load(model_path, map_location='cpu')
+    if algorithm == "mappo":
+        model.load_state_dict(ckpt['actor_state'])
+    else:
+        model.load_state_dict(ckpt['policy_state'])
+    model.eval()
+
+    controller = HierarchicalController()
+    expert = ExpertPolicyAllAgents()
     all_match_results = []
     all_rewards = []
+    all_actual = []
+    all_ideal = []
+    all_states = []
+    all_goals_for = []
+    all_goals_against = []
 
+    ep_prog = ProgressTracker(num_episodes, "Eval Episodes")
     for _ in range(num_episodes):
         reset_result = env.reset()
         obs_raw = reset_result[0] if isinstance(reset_result, tuple) else reset_result
         game_state = extract_game_state(obs_raw)
+        pass_tracker = PassTracker()
+        rci_tracker = RCITracker(NUM_AGENTS)
         done = False
         ep_reward = 0.0
+        ep_actual = []
+        ep_ideal = []
+        ep_states = []
+        prev_gs = None
         step = 0
 
         while not done and step < EPISODE_MAX_STEPS:
+            macro = controller.get_macro_strategy(game_state)
+            sub_goals = controller.get_sub_goals(game_state, macro)
+            ideal = expert.get_ideal_actions(game_state, sub_goals, macro)
+
             joint_actions = []
             for i in range(NUM_AGENTS):
                 obs_vec = extract_obs_vector(game_state, i)
                 obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
-
-                if algorithm == "ippo":
-                    from hmarl.ippo import FlatActorCritic
-                    model = FlatActorCritic().to(DEVICE)
-                elif algorithm == "shppo":
-                    from hmarl.shppo import SharedActorCritic
-                    model = SharedActorCritic().to(DEVICE)
-                elif algorithm == "mappo":
-                    from hmarl.mappo import DecentralizedActor
-                    model = DecentralizedActor().to(DEVICE)
-                else:
-                    break
-
-                if i == 0:
-                    ckpt = torch.load(model_path, map_location='cpu')
-                    if algorithm == "mappo":
-                        model.load_state_dict(ckpt['actor_state'])
-                    else:
-                        model.load_state_dict(ckpt['policy_state'])
-                    model.eval()
-
                 with torch.no_grad():
                     logits, _ = model(obs_t) if algorithm != "mappo" else (model(obs_t), None)
                     joint_actions.append(logits.argmax(dim=-1).item())
@@ -271,17 +250,40 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
                 done = terminated or truncated
             else:
                 obs_raw, reward, done, info = step_result
-            ep_reward += float(np.sum(reward))
-            game_state = extract_game_state(obs_raw)
+            team_reward = float(np.sum(reward))
+            new_gs = extract_game_state(obs_raw)
+            pass_tracker.update(new_gs, prev_gs)
+            total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker)
+            ep_reward += total_r
+            ep_actual.append(joint_actions)
+            ep_ideal.append(ideal)
+            ep_states.append(new_gs)
+            prev_gs = game_state
+            game_state = new_gs
             step += 1
 
         score = info.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         all_match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)
+        all_actual.extend(ep_actual)
+        all_ideal.extend(ep_ideal)
+        all_states.extend(ep_states)
+        all_goals_for.append(gf)
+        all_goals_against.append(ga)
+        ep_prog.update()
 
+    ep_prog.done()
     env.close()
-    return {'win_rate': compute_win_rate(all_match_results), 'avg_reward': float(np.mean(all_rewards))}
+
+    metrics = compute_all_metrics(all_actual, all_states, all_ideal,
+                                  goals_for=sum(all_goals_for), goals_against=sum(all_goals_against),
+                                  cumulative_reward=sum(all_rewards))
+    metrics['win_rate'] = compute_win_rate(all_match_results)
+    metrics['goal_difference'] = compute_goal_difference(all_goals_for, all_goals_against)
+    return metrics
+
+
 
 
 def evaluate_random(num_episodes: int, seed: int) -> Dict:
@@ -293,7 +295,7 @@ def evaluate_random(num_episodes: int, seed: int) -> Dict:
     match_results = []
     all_rewards = []
 
-    for _ in range(num_episodes):
+    for ep in range(num_episodes):
         obs = env.reset()
         obs_raw = obs[0] if isinstance(obs, tuple) else obs
         done = False
@@ -313,11 +315,11 @@ def evaluate_random(num_episodes: int, seed: int) -> Dict:
 
         score = info.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
-        all_match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
+        match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)
 
     env.close()
-    return {'win_rate': compute_win_rate(all_match_results), 'avg_reward': float(np.mean(all_rewards))}
+    return {'win_rate': compute_win_rate(match_results), 'avg_reward': float(np.mean(all_rewards))}
 
 
 def run_statistical_test(hmarl_values: List[float], baseline_values: List[float],
@@ -379,9 +381,10 @@ def main():
         seed_rewards = []
         seed_rci = []
 
+        seed_prog = ProgressTracker(args.seeds, f"Seeds ({alg.upper()})")
         for s in range(args.seeds):
             seed = args.base_seed + s
-            print(f"\n  Seed {s+1}/{args.seeds} (seed={seed})")
+            seed_prog.update(extra=f"seed={seed}")
 
             try:
                 if alg == "hmarl":
@@ -397,12 +400,14 @@ def main():
                 seed_rewards.append(metrics.get('avg_reward', 0) if 'avg_reward' in metrics else 0)
                 seed_rci.append(metrics.get('rci_cat', 0) if 'rci_cat' in metrics else 0)
 
-                print(f"    WR: {metrics.get('win_rate', 0):.1f}% | "
+                print(f"\n    WR: {metrics.get('win_rate', 0):.1f}% | "
                       f"GD: {metrics.get('goal_difference', 'N/A')} | "
                       f"RCI: {metrics.get('rci_cat', 'N/A')}")
 
-            except Exception as e:
-                print(f"    FAILED: {e}")
+            except Exception:
+                traceback.print_exc()
+
+        seed_prog.done()
 
         if seed_win_rates:
             all_results[alg] = {
@@ -453,6 +458,8 @@ def main():
     with open(args.output, 'w') as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {args.output}")
+
+    cleanup_temp_dirs()
 
 
 if __name__ == "__main__":
