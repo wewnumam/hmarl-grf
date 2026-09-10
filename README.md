@@ -210,20 +210,53 @@ Two observation modes:
 
 ## Setup
 
+### Google Research Football (GRF) Installation
+
+GRF requires building from source — it has no pre-built packages for Windows. Docker is the supported approach.
+
+**Option A: Docker (recommended)**
+
 ```bash
-# Build and start Docker container
+# 1. Clone GRF into a temporary directory (needed for Docker build)
+git clone https://github.com/google-research/football.git /tmp/grf
+
+# 2. Copy GRF source into this project (Dockerfile expects it at project root)
+cp -r /tmp/grf/. .
+
+# 3. Build and start the container (installs GRF + dependencies)
 docker compose up -d
 
-# Enter container
+# 4. Enter the container
 docker exec -it gfootball-dev bash
 
-# Install package (inside container)
-cd /path/to/hmarl-grf
+# 5. Install this package (inside container)
+cd /gfootball
 pip install -e .
 
-# Optional: install analysis tools
+# 6. Optional: install analysis tools
 pip install optuna scipy
 ```
+
+**Option B: Native (Linux only, no Docker)**
+
+```bash
+# 1. Install system dependencies
+sudo apt-get install -y git cmake build-essential \
+    libgl1-mesa-dev libsdl2-dev libsdl2-image-dev \
+    libsdl2-ttf-dev libsdl2-gfx-dev libboost-all-dev \
+    libdirectfb-dev
+
+# 2. Clone and build GRF
+git clone https://github.com/google-research/football.git
+cd football
+pip install .
+cd ..
+
+# 3. Install this package
+pip install -e .
+```
+
+**Note:** GRF does not support native Windows installation. Windows users must use Docker. WSL2 + Docker Desktop is the recommended path.
 
 ## Training
 
@@ -251,7 +284,7 @@ python scripts/train.py --dump-freq 100 --max-dumps 20
 python scripts/train.py --dump-freq 0
 ```
 
-**Mid-training evaluation:** Automatically runs 10-episode evaluation every 50,000 steps, logging win rate, avg reward, and goal difference to TensorBoard.
+**Mid-training evaluation:** Automatically runs 10-episode evaluation every 500 episodes, logging win rate, avg reward, and goal difference to TensorBoard.
 
 **Training log:** Per-episode metrics saved to `dumps/training_log.json` (rewards, RCI, FAI, PPR, compactness).
 

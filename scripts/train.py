@@ -12,6 +12,7 @@ Algorithm (from thesis BAB_4, Algoritme 1):
 """
 
 import os
+import signal
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
@@ -66,11 +67,10 @@ VF_COEF = 0.5         # Value loss coefficient (c1)
 MINIBATCH_SIZE = 64
 NUM_EPOCHS = 4        # PPO epochs per update
 TOTAL_TIMESTEPS = 3_000_000  # 2-5 juta (thesis)
-EVAL_FREQ = 10_000
-LOG_FREQ = 1_000
-SAVE_FREQ = 50_000
-EPISODE_MAX_STEPS = 3000  # GRF half = 3000 timesteps
-NUM_EVAL_EPISODES = 100
+EPISODE_MAX_STEPS = 3000   # GRF half = 3000 timesteps
+LOG_FREQ = 50              # TensorBoard scalars + print every N episodes
+SAVE_FREQ = 500            # Checkpoint + eval every N episodes
+NUM_EVAL_EPISODES = 10     # Episodes per mid-training eval
 DUMP_FREQ = 500          # Enable dump every N episodes
 MAX_DUMPS = 10            # Keep at most N dump files
 
@@ -200,13 +200,11 @@ class HMARLTrainer:
     def __init__(
         self,
         total_timesteps: int = TOTAL_TIMESTEPS,
-        eval_freq: int = EVAL_FREQ,
         log_dir: str = LOG_DIR,
         model_dir: str = MODEL_DIR,
         render: bool = False,
     ):
         self.total_timesteps = total_timesteps
-        self.eval_freq = eval_freq
         self.log_dir = log_dir
         self.model_dir = model_dir
         self.render = render
@@ -247,6 +245,17 @@ class HMARLTrainer:
 
         # Logging
         self.writer = SummaryWriter(log_dir=f"{log_dir}/hmarl_runs")
+
+        # Log hyperparams as scalars (add_hparams removed in newer TensorBoard)
+        hparam_dict = {
+            'lr': LEARNING_RATE, 'gamma': GAMMA,
+            'gae_lambda': GAE_LAMBDA, 'clip_range': CLIP_RANGE,
+            'ent_coef': ENT_COEF, 'vf_coef': VF_COEF,
+            'minibatch_size': MINIBATCH_SIZE, 'num_epochs': NUM_EPOCHS,
+            'hidden_dim': HIDDEN_DIM, 'head_dim': HEAD_DIM,
+        }
+        for k, v in hparam_dict.items():
+            self.writer.add_scalar(f'hparams/{k}', v, 0)
 
         # Training state
         self.global_step = 0
@@ -410,6 +419,7 @@ class HMARLTrainer:
             'all_actual_actions': all_actual_actions,
             'all_ideal_actions': all_ideal_actions,
             'all_game_states': all_game_states,
+            'reward_breakdown': reward_breakdown,
         }
 
     def _ppo_update(self):
@@ -580,17 +590,42 @@ class HMARLTrainer:
                 elapsed = time.time() - start_time
                 steps_per_sec = self.global_step / max(elapsed, 1)
 
+                # Rolling window for thesis-critical metrics (last 50 eps)
+                window = min(50, len(self._train_log['episode_rci_cat']))
+                rci_cat_avg = np.mean(self._train_log['episode_rci_cat'][-window:])
+                rci_strict_avg = np.mean(self._train_log['episode_rci_strict'][-window:])
+                fai_avg = np.mean(self._train_log['episode_fai'][-window:])
+                ppr_avg = np.mean(self._train_log['episode_ppr'][-window:])
+                comp_avg = np.mean(self._train_log['episode_compactness'][-window:])
+
                 print(
                     f"Ep {self.episode_count:6d} | "
                     f"Step {self.global_step:8d}/{self.total_timesteps:,} | "
                     f"Avg Reward (100ep): {avg_reward:8.2f} | "
-                    f"Score: {stats['score_left']}-{stats['score_right']} | "
+                    f"RCI: {rci_cat_avg:.3f} | FAI: {fai_avg:.3f} | "
+                    f"PPR: {ppr_avg:.3f} | Compact: {comp_avg:.3f} | "
                     f"Steps/s: {steps_per_sec:.1f}"
                 )
 
+                # Reward curve
                 self.writer.add_scalar('reward/episode', stats['episode_reward'], self.episode_count)
                 self.writer.add_scalar('reward/avg_100', avg_reward, self.episode_count)
                 self.writer.add_scalar('training/episode_length', stats['episode_length'], self.episode_count)
+
+                # Reward breakdown (last episode)
+                rb = stats.get('reward_breakdown', {})
+                if rb:
+                    self.writer.add_scalar('reward/game', rb.get('game_reward', 0), self.episode_count)
+                    self.writer.add_scalar('reward/r_high', rb.get('r_high', 0), self.episode_count)
+                    self.writer.add_scalar('reward/r_mid', rb.get('r_mid', 0), self.episode_count)
+                    self.writer.add_scalar('reward/r_low', rb.get('r_low', 0), self.episode_count)
+
+                # Thesis-critical metrics (rolling avg)
+                self.writer.add_scalar('metrics/rci_cat', rci_cat_avg, self.episode_count)
+                self.writer.add_scalar('metrics/rci_strict', rci_strict_avg, self.episode_count)
+                self.writer.add_scalar('metrics/fai', fai_avg, self.episode_count)
+                self.writer.add_scalar('metrics/ppr', ppr_avg, self.episode_count)
+                self.writer.add_scalar('metrics/compactness', comp_avg, self.episode_count)
 
             # Save checkpoint + mid-training eval
             if self.episode_count % SAVE_FREQ == 0 and self.episode_count > 0:
@@ -753,8 +788,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train HMARL on GRF 11v11")
     parser.add_argument("--timesteps", type=int, default=TOTAL_TIMESTEPS,
                         help="Total training timesteps")
-    parser.add_argument("--eval-freq", type=int, default=EVAL_FREQ,
-                        help="Evaluation frequency (episodes)")
     parser.add_argument("--render", action="store_true",
                         help="Render during training")
     parser.add_argument("--resume", type=str, default=None,
@@ -776,7 +809,6 @@ if __name__ == "__main__":
 
     trainer = HMARLTrainer(
         total_timesteps=args.timesteps,
-        eval_freq=args.eval_freq,
         log_dir=args.log_dir,
         model_dir=args.model_dir,
         render=args.render,
@@ -784,5 +816,17 @@ if __name__ == "__main__":
 
     if args.resume:
         trainer.load_checkpoint(args.resume)
+
+    # Graceful shutdown: save checkpoint on SIGINT/SIGTERM
+    def _shutdown(signum, frame):
+        sig_name = signal.Signals(signum).name
+        print(f"\n[SHUTDOWN] {sig_name} received — saving checkpoint...")
+        trainer._save_checkpoint()
+        trainer._save_training_log()
+        trainer.writer.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
 
     trainer.train()

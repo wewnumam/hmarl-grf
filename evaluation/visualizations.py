@@ -483,15 +483,15 @@ def plot_formation_snapshot(
         role_name = ROLE_NAMES.get(role_id, f'P{i}')
         color = ROLE_COLORS.get(role_name, '#333333')
 
-        ax.scatter(x[i], y[i], c=color, s=180, zorder=3,
+        ax.scatter(x[i], y[i], c=color, s=500, zorder=3,
                   edgecolors='white', linewidth=1.5)
-        ax.annotate(role_name, (x[i], y[i]), fontsize=8, fontweight='bold',
+        ax.annotate(role_name, (x[i], y[i]), fontsize=12, fontweight='bold',
                    color='white', ha='center', va='center', zorder=4)
 
     # Plot target formation
     if show_target:
         ax.scatter(targets[:, 0], targets[:, 1], c='none',
-                  s=200, edgecolors='gray', linewidth=1, linestyle='--',
+                  s=500, edgecolors='gray', linewidth=1, linestyle='--',
                   zorder=2, alpha=0.5, label='Target Formation')
 
     ax.set_xlim(-2, pitch_length + 2)
@@ -1172,3 +1172,252 @@ def generate_all_plots(
             )
 
     print(f'\nAll plots saved to: {output_dir}')
+
+
+# ---------------------------------------------------------------------------
+# 13. Pass Network Graph
+# ---------------------------------------------------------------------------
+def plot_pass_network(
+    pass_matrix: np.ndarray,
+    output_path: str,
+    roles: Optional[List[int]] = None,
+    title: str = 'Pass Network',
+):
+    """Weighted directed graph of pass connections between players.
+
+    Args:
+        pass_matrix: (11, 11) pass count matrix from pass_network_matrix()
+        output_path: path to save figure
+        roles: list of 11 role IDs for labeling; defaults to 0-10
+        title: plot title
+    """
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    n = pass_matrix.shape[0]
+    # Fixed positions: GK left, defenders, midfielders, attackers right
+    # Layout: 4-2-4 on a half-pitch
+    positions = {
+        0: (0.10, 0.50),   # GK
+        1: (0.30, 0.70),   # CB
+        2: (0.30, 0.25),   # LB
+        3: (0.30, 0.75),   # RB
+        4: (0.50, 0.35),   # DM
+        5: (0.50, 0.65),   # CM
+        6: (0.70, 0.15),   # LM
+        7: (0.70, 0.40),   # RM
+        8: (0.70, 0.60),   # AM
+        9: (0.70, 0.85),   # CF
+        10: (0.85, 0.50),  # CF2
+    }
+
+    role_names = roles if roles else list(range(n))
+    labels = [ROLE_NAMES.get(role_names[i], str(i)) for i in range(n)]
+
+    # Draw edges with width proportional to pass count
+    max_pass = max(pass_matrix.max(), 1)
+    for i in range(n):
+        for j in range(n):
+            if i == j or pass_matrix[i, j] == 0:
+                continue
+            width = 0.5 + 3.0 * (pass_matrix[i, j] / max_pass)
+            xi, yi = positions[i]
+            xj, yj = positions[j]
+            ax.annotate(
+                '', xy=(xj, yj), xytext=(xi, yi),
+                arrowprops=dict(
+                    arrowstyle='->', lw=width,
+                    color='#555555', alpha=0.6,
+                    connectionstyle='arc3,rad=0.1',
+                ),
+            )
+
+    # Draw nodes
+    for i in range(n):
+        x, y = positions[i]
+        total_pass = pass_matrix[i].sum()
+        size = 300 + 700 * (total_pass / max(max_pass, 1))
+        role_label = ROLE_NAMES.get(role_names[i], '?')
+        color = ROLE_COLORS.get(role_label, '#888888')
+        ax.scatter(x, y, s=size, c=color, edgecolors='#333333',
+                   linewidths=0.8, zorder=3)
+        ax.annotate(labels[i], (x, y), textcoords='offset points',
+                    xytext=(0, -14), ha='center', fontsize=8, fontweight='bold')
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_aspect('equal')
+    ax.set_title(title)
+    ax.axis('off')
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    print(f'Saved: {output_path}')
+
+
+# ---------------------------------------------------------------------------
+# 14. Inter-Agent Distance Per Line
+# ---------------------------------------------------------------------------
+def plot_iad_per_line(
+    data: Dict[str, float],
+    output_path: str,
+    title: str = 'Inter-Agent Distance by Tactical Line',
+):
+    """Bar chart of mean gaps between defence/midfield/attack lines.
+
+    Args:
+        data: dict with keys 'defence_midfield_gap', 'midfield_attack_gap',
+              'overall_spread'
+        output_path: path to save figure
+    """
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    labels = ['Defence ↔ Midfield', 'Midfield ↔ Attack', 'Overall Spread']
+    values = [
+        data.get('defence_midfield_gap', 0),
+        data.get('midfield_attack_gap', 0),
+        data.get('overall_spread', 0),
+    ]
+    colors = ['#3498db', '#f39c12', '#e74c3c']
+
+    bars = ax.bar(labels, values, color=colors, edgecolor='#333333', width=0.5)
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
+                f'{val:.1f}', ha='center', va='bottom', fontsize=9)
+
+    ax.set_ylabel('Distance (pitch units)')
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    print(f'Saved: {output_path}')
+
+
+# ---------------------------------------------------------------------------
+# 15. Convex Hull Area Distribution
+# ---------------------------------------------------------------------------
+def plot_convex_hull(
+    game_states: List[Dict],
+    output_path: str,
+    team_side: str = 'left',
+    title: str = 'Convex Hull Area Over Time',
+):
+    """Plot per-timestep convex hull area as a time series.
+
+    Args:
+        game_states: list of game state dicts
+        output_path: path to save figure
+        team_side: 'left' or 'right'
+        title: plot title
+    """
+    from hmarl.metrics import _convex_hull_area_numpy
+
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    key = f'{team_side}_team'
+    areas = []
+    for gs in game_states:
+        positions = gs.get(key, [])
+        if len(positions) < 11:
+            areas.append(0.0)
+            continue
+        outfield_pos = np.array(positions[1:11])
+        x_s = (outfield_pos[:, 0] + 1.0) * 60.0
+        y_s = (outfield_pos[:, 1] + 0.42) * (80.0 / 0.84)
+        pts = np.column_stack([x_s, y_s])
+        areas.append(_convex_hull_area_numpy(pts))
+
+    if not areas:
+        ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center')
+    else:
+        ax.plot(range(len(areas)), areas, color='#3498db', linewidth=0.8, alpha=0.8)
+        if len(areas) >= 20:
+            smoothed = np.convolve(areas, np.ones(20) / 20, mode='valid')
+            ax.plot(range(19, len(areas)), smoothed,
+                    color='#e74c3c', linewidth=2, label='Rolling mean (20)')
+            ax.legend()
+
+    ax.set_xlabel('Timestep')
+    ax.set_ylabel('Convex Hull Area')
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    print(f'Saved: {output_path}')
+
+
+# ---------------------------------------------------------------------------
+# 16. Action Transition Probabilities Heatmap
+# ---------------------------------------------------------------------------
+def plot_action_transitions(
+    trans_probs: np.ndarray,
+    output_path: str,
+    title: str = 'Action Transition Probabilities',
+    max_actions: int = 19,
+):
+    """Heatmap of action-to-action transition probabilities.
+
+    Args:
+        trans_probs: (num_actions, num_actions) probability matrix
+        output_path: path to save figure
+        title: plot title
+        max_actions: limit axes to this many actions for readability
+    """
+    _apply_style()
+    n = min(trans_probs.shape[0], max_actions)
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    im = ax.imshow(trans_probs[:n, :n], cmap='YlOrRd', aspect='equal')
+    ax.set_xlabel('Next Action')
+    ax.set_ylabel('Current Action')
+    ax.set_title(title)
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('P(next | current)')
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    print(f'Saved: {output_path}')
+
+
+# ---------------------------------------------------------------------------
+# 17. Ball Progression Rate Distribution
+# ---------------------------------------------------------------------------
+def plot_bpr_distribution(
+    game_states: List[Dict],
+    output_path: str,
+    title: str = 'Ball Progression Rate Distribution',
+):
+    """Histogram of per-timestep ball x-displacement when team owns the ball.
+
+    Args:
+        game_states: list of game state dicts
+        output_path: path to save figure
+    """
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    deltas = []
+    for t in range(len(game_states) - 1):
+        ball_x = game_states[t].get('ball', [0, 0, 0])[0]
+        ball_x_next = game_states[t + 1].get('ball', [0, 0, 0])[0]
+        if game_states[t].get('ball_owned_team', -1) == 0:
+            deltas.append((ball_x_next - ball_x) * 60.0)
+
+    if deltas:
+        ax.hist(deltas, bins=50, color='#3498db', edgecolor='#333333', alpha=0.8)
+        mean_d = np.mean(deltas)
+        ax.axvline(mean_d, color='#e74c3c', linestyle='--', linewidth=1.5,
+                    label=f'Mean: {mean_d:.2f}')
+        ax.legend()
+    ax.set_xlabel('Ball x-displacement (pitch units)')
+    ax.set_ylabel('Frequency')
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    print(f'Saved: {output_path}')

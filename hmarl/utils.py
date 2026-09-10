@@ -226,3 +226,93 @@ def cleanup_temp_dirs(base_dirs=None):
         if os.path.isdir(d):
             shutil.rmtree(d, ignore_errors=True)
             print(f"  Cleaned up: {d}/")
+
+
+# ---------------------------------------------------------------------------
+# Centralized obs (MAPPO / SHPPO shared)
+# ---------------------------------------------------------------------------
+def build_centralized_obs(obs_list) -> np.ndarray:
+    """Concatenate all agents' observations into one centralized obs vector.
+
+    Args:
+        obs_list: list of N (obs_dim,) arrays, one per agent
+    Returns:
+        (N * obs_dim,) float32 array
+    """
+    return np.concatenate(obs_list).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Quick eval (shared across flat baselines)
+# ---------------------------------------------------------------------------
+def quick_eval(
+    model,
+    num_episodes: int = 10,
+    extra_modules=None,
+) -> Dict:
+    """Run quick evaluation during training.
+
+    Args:
+        model: nn.Module with forward(obs) -> (logits, value)
+        num_episodes: episodes to evaluate
+        extra_modules: list of nn.Module to put in eval/train mode
+                       alongside model (e.g. [inference_net])
+    """
+    import torch
+    from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
+
+    DEVICE = next(model.parameters()).device
+    model.eval()
+    if extra_modules:
+        for m in extra_modules:
+            m.eval()
+
+    eval_env = create_raw_env(render=False)
+    wins, total_gf, total_ga, total_r = 0, 0, 0, 0.0
+
+    for _ in range(num_episodes):
+        reset_result = eval_env.reset()
+        obs_raw = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+        game_state = extract_game_state(obs_raw)
+        ep_r = 0.0
+        done = False
+        step = 0
+
+        while not done and step < EPISODE_MAX_STEPS:
+            joint_actions = []
+            for i in range(NUM_AGENTS):
+                obs_vec = extract_obs_vector(game_state, i)
+                obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
+                with torch.no_grad():
+                    logits, _ = model(obs_t)
+                    joint_actions.append(logits.argmax(dim=-1).item())
+
+            step_result = eval_env.step(joint_actions)
+            if len(step_result) == 5:
+                obs_raw, reward, terminated, truncated, info = step_result
+                done = terminated or truncated
+            else:
+                obs_raw, reward, done, info = step_result
+            ep_r += float(np.sum(reward))
+            game_state = extract_game_state(obs_raw)
+            step += 1
+
+        score = info.get('score', [0, 0])
+        gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
+        if gf > ga:
+            wins += 1
+        total_gf += gf
+        total_ga += ga
+        total_r += ep_r
+
+    eval_env.close()
+    model.train()
+    if extra_modules:
+        for m in extra_modules:
+            m.train()
+
+    return {
+        'win_rate': wins / num_episodes * 100.0,
+        'avg_reward': total_r / num_episodes,
+        'goal_diff': total_gf - total_ga,
+    }

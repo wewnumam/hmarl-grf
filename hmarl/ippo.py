@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from hmarl.utils import set_seed, extract_obs_vector, quick_eval
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 
 OBS_DIM = 115
@@ -37,16 +38,6 @@ EPISODE_MAX_STEPS = 3000
 LEARNING_RATE = 3e-4
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def set_seed(seed: int):
-    """Set random seeds for reproducibility."""
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 class FlatActorCritic(nn.Module):
@@ -137,35 +128,6 @@ class IPPORolloutBuffer:
             }
 
 
-def extract_obs_vector(game_state, player_idx):
-    """Extract 115-dim observation for a player from raw dict."""
-    features = []
-    ball = game_state.get('ball', [0, 0, 0])
-    features.extend(ball)
-    features.extend(game_state.get('ball_direction', [0, 0, 0]))
-    features.extend(game_state.get('ball_rotation', [0, 0, 0]))
-    features.append(float(game_state.get('ball_owned_team', -1)))
-    features.append(float(game_state.get('ball_owned_player', -1)))
-
-    for i in range(11):
-        pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-        direction = game_state.get('left_team_direction', [[0, 0]] * 11)[i] if 'left_team_direction' in game_state else [0, 0]
-        tired = game_state.get('left_team_tired_factor', [0.0] * 11)[i] if 'left_team_tired_factor' in game_state else 0.0
-        yellow = game_state.get('left_team_yellow_card', [0] * 11)[i] if 'left_team_yellow_card' in game_state else 0
-        role = game_state.get('left_team_roles', [5] * 11)[i] if 'left_team_roles' in game_state else 5
-        features.append(1.0 if i == player_idx else 0.0)
-        features.extend(pos)
-        features.extend(direction)
-        features.append(tired)
-        features.append(float(yellow))
-        features.append(float(role))
-
-    features = features[:OBS_DIM]
-    while len(features) < OBS_DIM:
-        features.append(0.0)
-    return np.array(features, dtype=np.float32)
-
-
 class IPPOTrainer:
     """Independent PPO: trains one shared policy for all agents (flat)."""
 
@@ -236,7 +198,7 @@ class IPPOTrainer:
 
                 episode_reward += team_reward
                 step += 1
-                self.global_step += NUM_AGENTS
+                self.global_step += 1  # count env steps, not per-agent
 
             # PPO update
             with torch.no_grad():
@@ -251,7 +213,7 @@ class IPPOTrainer:
             if self.episode_count % 500 == 0:
                 elapsed = time.time() - start
                 print(
-                    f"Ep {self.episode_count:6d} | Step {self.global_step:8d} | "
+                    f"Ep {self.episode_count:6d} | Step {self.global_step:8d}/{self.total_timesteps:,} | "
                     f"Reward: {episode_reward:7.2f} | "
                     f"Steps/s: {self.global_step/max(elapsed,1):.1f}"
                 )
@@ -316,51 +278,7 @@ class IPPOTrainer:
 
     def _quick_eval(self, num_episodes: int = 10) -> Dict:
         """Run quick evaluation during training."""
-        self.policy.eval()
-        eval_env = create_raw_env(render=False)
-        wins, total_goals_for, total_goals_against, total_reward = 0, 0, 0, 0.0
-
-        for _ in range(num_episodes):
-            reset_result = eval_env.reset()
-            obs_raw = reset_result[0] if isinstance(reset_result, tuple) else reset_result
-            game_state = extract_game_state(obs_raw)
-            ep_reward = 0.0
-            done = False
-            step = 0
-
-            while not done and step < EPISODE_MAX_STEPS:
-                joint_actions = []
-                for i in range(NUM_AGENTS):
-                    obs_vec = extract_obs_vector(game_state, i)
-                    obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
-                    with torch.no_grad():
-                        logits, _ = self.policy(obs_t)
-                        joint_actions.append(logits.argmax(dim=-1).item())
-
-                step_result = eval_env.step(joint_actions)
-                if len(step_result) == 5:
-                    obs_raw, reward, terminated, truncated, info = step_result
-                    done = terminated or truncated
-                else:
-                    obs_raw, reward, done, info = step_result
-                ep_reward += float(np.sum(reward))
-                game_state = extract_game_state(obs_raw)
-                step += 1
-
-            score = info.get('score', [0, 0])
-            gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
-            if gf > ga: wins += 1
-            total_goals_for += gf
-            total_goals_against += ga
-            total_reward += ep_reward
-
-        eval_env.close()
-        self.policy.train()
-        return {
-            'win_rate': wins / num_episodes * 100.0,
-            'avg_reward': total_reward / num_episodes,
-            'goal_diff': total_goals_for - total_goals_against,
-        }
+        return quick_eval(self.policy, num_episodes)
 
 
 if __name__ == "__main__":

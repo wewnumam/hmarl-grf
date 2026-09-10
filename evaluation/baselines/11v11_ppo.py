@@ -1,6 +1,6 @@
 import gfootball.env as football_env
 import numpy as np
-import gym
+import gymnasium as gym
 from stable_baselines3 import PPO
 from typing import Any, Dict, List, Tuple
 

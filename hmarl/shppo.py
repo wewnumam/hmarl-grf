@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from hmarl.utils import set_seed, extract_obs_vector, build_centralized_obs
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 
 OBS_DIM = 115
@@ -52,16 +53,6 @@ INFERENCE_LR_SCALE = 1.0  # Inference net uses same LR as main policy
 AUX_LOSS_COEF = 0.1      # Weight of auxiliary inference loss
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def set_seed(seed: int):
-    """Set random seeds for reproducibility."""
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 # ---------------------------------------------------------------------------
@@ -295,47 +286,6 @@ class SHPPORolloutBuffer:
 
 
 # ---------------------------------------------------------------------------
-# Observation extraction (shared across baselines)
-# ---------------------------------------------------------------------------
-def extract_obs_vector(game_state, player_idx):
-    """Extract 115-dim observation vector for a player from raw dict."""
-    features = []
-    ball = game_state.get('ball', [0, 0, 0])
-    features.extend(ball)
-    features.extend(game_state.get('ball_direction', [0, 0, 0]))
-    features.extend(game_state.get('ball_rotation', [0, 0, 0]))
-    features.append(float(game_state.get('ball_owned_team', -1)))
-    features.append(float(game_state.get('ball_owned_player', -1)))
-
-    for i in range(11):
-        pos = game_state.get('left_team', [[0, 0]] * 11)[i]
-        direction = (game_state.get('left_team_direction', [[0, 0]] * 11)[i]
-                     if 'left_team_direction' in game_state else [0, 0])
-        tired = (game_state.get('left_team_tired_factor', [0.0] * 11)[i]
-                 if 'left_team_tired_factor' in game_state else 0.0)
-        yellow = (game_state.get('left_team_yellow_card', [0] * 11)[i]
-                  if 'left_team_yellow_card' in game_state else 0)
-        role = (game_state.get('left_team_roles', [5] * 11)[i]
-                if 'left_team_roles' in game_state else 5)
-        features.append(1.0 if i == player_idx else 0.0)
-        features.extend(pos)
-        features.extend(direction)
-        features.append(tired)
-        features.append(float(yellow))
-        features.append(float(role))
-
-    features = features[:OBS_DIM]
-    while len(features) < OBS_DIM:
-        features.append(0.0)
-    return np.array(features, dtype=np.float32)
-
-
-def build_centralized_obs(obs_list: List[np.ndarray]) -> np.ndarray:
-    """Concatenate all agents' observations into one centralized obs vector."""
-    return np.concatenate(obs_list).astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
 # 7. SHPPO Trainer
 # ---------------------------------------------------------------------------
 class SHPPOTrainer:
@@ -448,7 +398,7 @@ class SHPPOTrainer:
                 game_state = extract_game_state(obs_raw)
                 episode_reward += team_reward
                 step += 1
-                self.global_step += NUM_AGENTS
+                self.global_step += 1  # count env steps, not per-agent
 
             # PPO update + inference net update
             with torch.no_grad():
@@ -465,7 +415,7 @@ class SHPPOTrainer:
             if self.episode_count % 500 == 0:
                 elapsed = time.time() - start
                 print(
-                    f"Ep {self.episode_count:6d} | Step {self.global_step:8d} | "
+                    f"Ep {self.episode_count:6d} | Step {self.global_step:8d}/{self.total_timesteps:,} | "
                     f"Reward: {episode_reward:7.2f} | "
                     f"Steps/s: {self.global_step/max(elapsed,1):.1f}"
                 )
