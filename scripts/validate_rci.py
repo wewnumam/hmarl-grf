@@ -305,7 +305,7 @@ def sensitivity_analysis(
             hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
         ).to(DEVICE)
         subgoal_emb = SubGoalEmbedding().to(DEVICE)
-        ckpt = torch.load(ckpt_path, map_location='cpu')
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         policy.load_state_dict(ckpt['policy_state'])
         subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
         policy.eval()
@@ -520,7 +520,7 @@ def run_sensitivity_from_checkpoint(model_path: str, output_path: str, n_episode
             hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
         ).to(DEVICE)
         subgoal_emb = SubGoalEmbedding().to(DEVICE)
-        ckpt = torch.load(model_path, map_location='cpu')
+        ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
         policy.load_state_dict(ckpt['policy_state'])
         subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
         policy.eval()

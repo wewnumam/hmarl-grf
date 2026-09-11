@@ -270,7 +270,7 @@ class IPPOTrainer:
         print(f"Model saved: {path}")
 
     def load(self, path):
-        ckpt = torch.load(path, map_location=DEVICE)
+        ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
         self.policy.load_state_dict(ckpt['policy_state'])
         self.optimizer.load_state_dict(ckpt['optimizer_state'])
         self.global_step = ckpt['global_step']

@@ -303,7 +303,7 @@ def evaluate_ablation_config(ckpt_path: str, num_episodes: int, seed: int,
         hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
     ).to(DEVICE)
     subgoal_emb = SubGoalEmbedding().to(DEVICE)
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     policy.load_state_dict(ckpt['policy_state'])
     subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
     policy.eval()
@@ -356,7 +356,7 @@ def evaluate_ablation_config(ckpt_path: str, num_episodes: int, seed: int,
             game_state = extract_game_state(obs_raw)
             step += 1
 
-        score = info.get('score', [0, 0])
+        score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)

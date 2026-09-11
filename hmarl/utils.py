@@ -111,7 +111,7 @@ def load_hmarl_checkpoint(
     ).to(dev)
     subgoal_emb = SubGoalEmbedding().to(dev)
 
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     policy.load_state_dict(ckpt['policy_state'])
     subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
     policy.eval()
@@ -297,7 +297,7 @@ def quick_eval(
             game_state = extract_game_state(obs_raw)
             step += 1
 
-        score = info.get('score', [0, 0])
+        score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         if gf > ga:
             wins += 1

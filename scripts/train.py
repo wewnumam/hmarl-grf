@@ -408,8 +408,8 @@ class HMARLTrainer:
         self.episode_count += 1
 
         # Determine match result
-        score_left = info.get('score', [0, 0])[0] if isinstance(info.get('score'), (list, tuple)) else 0
-        score_right = info.get('score', [0, 0])[1] if isinstance(info.get('score'), (list, tuple)) else 0
+        score_left = game_state.get('score', [0, 0])[0] if isinstance(game_state.get('score'), (list, tuple)) else 0
+        score_right = game_state.get('score', [0, 0])[1] if isinstance(game_state.get('score'), (list, tuple)) else 0
 
         return {
             'episode_reward': episode_reward,
@@ -703,7 +703,7 @@ class HMARLTrainer:
 
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location='cpu')
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
         self.policy.load_state_dict(checkpoint['policy_state'])
         self.subgoal_embedding.load_state_dict(checkpoint['subgoal_embedding_state'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])
@@ -759,7 +759,7 @@ class HMARLTrainer:
                 game_state = extract_game_state(obs_raw)
                 step += 1
 
-            score = info.get('score', [0, 0])
+            score = game_state.get('score', [0, 0])
             gf, ga = score[0], score[1] if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
             if gf > ga:
                 wins += 1

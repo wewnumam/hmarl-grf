@@ -116,7 +116,7 @@ def evaluate_policy(
             game_state = new_gs
             step += 1
 
-        score = info.get('score', [0, 0])
+        score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         result = 'win' if gf > ga else ('loss' if gf < ga else 'draw')
         match_results.append(result)
@@ -188,7 +188,7 @@ def objective(trial: Trial, timesteps: int, eval_episodes: int, base_seed: int) 
         # Evaluate best model
         ckpt_path = os.path.join(trainer.model_dir, "hmarl_model.pt")
         if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location='cpu')
+            ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
             trainer.policy.load_state_dict(ckpt['policy_state'])
             trainer.subgoal_embedding.load_state_dict(ckpt['subgoal_embedding_state'])
         metrics = evaluate_policy(trainer.policy, trainer.subgoal_embedding,

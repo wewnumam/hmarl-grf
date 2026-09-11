@@ -348,7 +348,7 @@ class MAPPOTrainer:
         print(f"Model saved: {path}")
 
     def load(self, path):
-        ckpt = torch.load(path, map_location=DEVICE)
+        ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
         self.actor.load_state_dict(ckpt['actor_state'])
         self.critic.load_state_dict(ckpt['critic_state'])
         self.actor_optimizer.load_state_dict(ckpt['actor_optimizer_state'])
