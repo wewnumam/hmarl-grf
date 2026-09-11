@@ -55,7 +55,19 @@ def generate_plots_from_results(
     episodes_data = load_json(os.path.join(results_dir, 'hmarl_episodes.json'))
 
     # --- Load training logs (if available) ---
-    training_log = load_json(os.path.join(results_dir, 'training_log.json')) if training_dir is None else load_json(os.path.join(training_dir, 'training_log.json'))
+    if training_dir:
+        training_log = load_json(os.path.join(training_dir, 'training_log.json'))
+    else:
+        # Auto-detect: check results_dir, dumps/, ../dumps/, ../../dumps/
+        training_log = {}
+        for candidate in [
+            os.path.join(results_dir, 'training_log.json'),
+            os.path.join(results_dir, '..', 'dumps', 'training_log.json'),
+            os.path.join(results_dir, '..', 'training_log.json'),
+        ]:
+            training_log = load_json(candidate)
+            if training_log:
+                break
 
     models_data = {}
     if hmarl_results:
@@ -131,6 +143,64 @@ def generate_plots_from_results(
         plot_compactness_over_time(
             compactness_data,
             os.path.join(output_dir, '08_compactness.png'),
+        )
+
+    # --- 9. Ablation Study ---
+    ablation_data = load_json(os.path.join(results_dir, 'ablation_results.json'))
+    if not ablation_data:
+        # Try parent dir
+        ablation_data = load_json(os.path.join(results_dir, '..', 'ablation_results.json'))
+    if ablation_data:
+        plot_ablation_study(
+            ablation_data,
+            os.path.join(output_dir, '09_ablation.png'),
+        )
+
+    # --- 10. Tactic Transitions ---
+    strategies = load_json(os.path.join(results_dir, 'strategies.json'))
+    sub_goals = load_json(os.path.join(results_dir, 'sub_goals.json'))
+    if strategies and sub_goals:
+        plot_tactic_transitions(
+            strategies,
+            sub_goals,
+            os.path.join(output_dir, '10_tactic_transitions.png'),
+        )
+
+    # --- 11. Reward Breakdown ---
+    reward_components = load_json(os.path.join(results_dir, 'reward_components.json'))
+    if reward_components and any(reward_components.values()):
+        plot_reward_breakdown(
+            reward_components,
+            os.path.join(output_dir, '11_reward_breakdown.png'),
+        )
+
+    # --- 14. Inter-Agent Distance Per Line ---
+    iad_data = {}
+    for model_name, m_data in models_data.items():
+        if all(k in m_data for k in ('defence_midfield_gap', 'midfield_attack_gap', 'overall_spread')):
+            iad_data[model_name] = {
+                'defence_midfield_gap': m_data['defence_midfield_gap'],
+                'midfield_attack_gap': m_data['midfield_attack_gap'],
+                'overall_spread': m_data['overall_spread'],
+            }
+    if iad_data:
+        # Plot grouped bars for IAD
+        from evaluation.visualizations import plot_iad_per_line as _plot_iad
+        # Use first model's data (typically HMARL)
+        first_model = list(iad_data.keys())[0]
+        _plot_iad(
+            iad_data[first_model],
+            os.path.join(output_dir, '14_iad_per_line.png'),
+            title=f'Inter-Agent Distance by Tactical Line ({first_model})',
+        )
+
+    # --- 15. Convex Hull Over Time ---
+    convex_hull_ts = load_json(os.path.join(results_dir, 'convex_hull_ts.json'))
+    if convex_hull_ts:
+        plot_compactness_over_time(
+            {'HMARL': convex_hull_ts},
+            os.path.join(output_dir, '15_convex_hull_ts.png'),
+            title='Convex Hull Area Over Time',
         )
 
     # --- 12. Correlation Heatmap ---

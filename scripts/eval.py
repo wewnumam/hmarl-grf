@@ -38,6 +38,7 @@ from hmarl.policy import (
 )
 from hmarl.expert import ExpertPolicyAllAgents
 from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+from hmarl.metrics import _convex_hull_area_numpy
 from hmarl.metrics import (
     compute_all_metrics, print_metrics,
     compute_win_rate, compute_goal_difference,
@@ -133,6 +134,8 @@ def evaluate_hmarl(
     all_goals_for = []
     all_goals_against = []
     all_rewards = []
+    ep_reward_components = []  # per-episode reward component sums
+    ep_episode_rc = {'game_reward': 0.0, 'r_high': 0.0, 'r_mid': 0.0, 'r_low': 0.0}
 
     # Aggregate actions/states for RCI across all episodes
     all_actual_actions_flat = []
@@ -143,6 +146,7 @@ def evaluate_hmarl(
     all_strategies = []
     all_sub_goals = []
     all_compactness_ts = []
+    all_convex_hull_ts = []
     all_roles = None
 
     print(f"\nEvaluating HMARL over {num_episodes} episodes...")
@@ -157,6 +161,7 @@ def evaluate_hmarl(
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
         episode_reward = 0.0
+        ep_episode_rc = {'game_reward': 0.0, 'r_high': 0.0, 'r_mid': 0.0, 'r_low': 0.0}
         episode_actual_actions = []
         episode_ideal_actions = []
         episode_game_states = []
@@ -190,6 +195,8 @@ def evaluate_hmarl(
                     centroid = scaled.mean(axis=0)
                     rho = float(np.sqrt(np.mean(np.sum((scaled - centroid)**2, axis=1))))
                     all_compactness_ts.append(rho)
+                    # Convex hull area per timestep
+                    all_convex_hull_ts.append(_convex_hull_area_numpy(scaled))
 
             joint_actions = []
             for i in range(NUM_AGENTS):
@@ -219,12 +226,14 @@ def evaluate_hmarl(
                 new_game_state = extract_game_state(obs_raw_new)
 
             pass_tracker.update(new_game_state, prev_game_state)
-            total_reward, _ = compute_hierarchical_reward(
+            total_reward, reward_breakdown = compute_hierarchical_reward(
                 team_reward, new_game_state, joint_actions, ideal_actions,
                 pass_tracker, rci_tracker,
             )
 
             episode_reward += total_reward
+            for k in ep_episode_rc:
+                ep_episode_rc[k] += reward_breakdown.get(k, 0.0)
             episode_actual_actions.append(joint_actions)
             episode_ideal_actions.append(ideal_actions)
             episode_game_states.append(new_game_state)
@@ -235,7 +244,7 @@ def evaluate_hmarl(
             step += 1
 
         # Determine match result
-        score = info.get('score', [0, 0])
+        score = game_state.get('score', [0, 0])
         if isinstance(score, (list, tuple)) and len(score) >= 2:
             gf, ga = score[0], score[1]
         else:
@@ -247,6 +256,7 @@ def evaluate_hmarl(
         all_goals_for.append(gf)
         all_goals_against.append(ga)
         all_rewards.append(episode_reward)
+        ep_reward_components.append({k: float(v) for k, v in ep_episode_rc.items()})
 
         all_actual_actions_flat.extend(episode_actual_actions)
         all_ideal_actions_flat.extend(episode_ideal_actions)
@@ -305,6 +315,31 @@ def evaluate_hmarl(
     ep_path = os.path.join(output_dir, "hmarl_episodes.json")
     with open(ep_path, 'w') as f:
         json.dump(episode_data, f, indent=2)
+
+    # Save per-episode reward components for plot 11
+    rc_path = os.path.join(output_dir, "reward_components.json")
+    rc_data = {
+        'game_reward': [d['game_reward'] for d in ep_reward_components],
+        'r_high': [d['r_high'] for d in ep_reward_components],
+        'r_mid': [d['r_mid'] for d in ep_reward_components],
+        'r_low': [d['r_low'] for d in ep_reward_components],
+    }
+    with open(rc_path, 'w') as f:
+        json.dump(rc_data, f)
+
+    # Save per-timestep strategies and sub_goals for plot 10
+    strat_path = os.path.join(output_dir, "strategies.json")
+    with open(strat_path, 'w') as f:
+        json.dump(all_strategies, f)
+    sg_path = os.path.join(output_dir, "sub_goals.json")
+    with open(sg_path, 'w') as f:
+        json.dump(all_sub_goals, f)
+
+    # Save per-timestep convex hull areas for plot 15
+    if all_convex_hull_ts:
+        ch_path = os.path.join(output_dir, "convex_hull_ts.json")
+        with open(ch_path, 'w') as f:
+            json.dump(all_convex_hull_ts, f)
 
     # --- Generate visualizations ---
     plots_dir = os.path.join(output_dir, "plots")
@@ -473,7 +508,7 @@ def evaluate_random_baseline(
                 new_gs = extract_game_state(obs_raw)
 
             pass_tracker.update(new_gs, prev_gs)
-            total_reward, _ = compute_hierarchical_reward(
+            total_reward, reward_breakdown = compute_hierarchical_reward(
                 team_reward, new_gs, joint_actions, ideal_actions,
                 pass_tracker, rci_tracker,
             )
@@ -487,7 +522,7 @@ def evaluate_random_baseline(
             game_state = new_gs
             step += 1
 
-        score = info.get('score', [0, 0])
+        score = game_state.get('score', [0, 0])
         gf, ga = score[0], score[1] if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         result = 'win' if gf > ga else ('loss' if gf < ga else 'draw')
 
