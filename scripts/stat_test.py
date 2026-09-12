@@ -346,7 +346,7 @@ def run_statistical_test(hmarl_values: List[float], baseline_values: List[float]
         result['test'] = 'Mann-Whitney U (one-sided: HMARL > baseline)'
         result['u_statistic'] = float(u_stat)
         result['p_value'] = float(p_value)
-        result['significant'] = p_value < 0.05
+        result['significant'] = bool(p_value < 0.05)
     except ValueError as e:
         result['test'] = f'error: {e}'
 

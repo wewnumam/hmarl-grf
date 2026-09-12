@@ -451,7 +451,7 @@ def main():
 
     total_start = time.time()
 
-    progress = ProgressTracker(total=len(configs_to_run), desc="Ablation configs")
+    progress = ProgressTracker(total=len(configs_to_run), label="Ablation configs")
     for config_name in configs_to_run:
         if config_name not in ABLATION_CONFIGS:
             print(f"  WARNING: Unknown config '{config_name}', skipping.")
