@@ -4,11 +4,12 @@ Implements:
 - Formation Adherence Index (FAI) - r_high
 - Progressive Pass Ratio (PPR) - r_mid
 - Role Coherence Index (RCI) - r_low (component, not full metric)
+- Ball Progression Reward - r_progression (dense forward-progress signal)
 
-Combined reward: R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t)
+Combined reward: R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t) + α_P·progression(t)
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 
@@ -25,13 +26,19 @@ from hmarl.policy import (
     HighLevelPolicy, MidLevelPolicy, NUM_SUBGOALS,
 )
 
-# Reward coefficients (from thesis)
-ALPHA_HIGH = 0.01
-ALPHA_MID = 0.01
-ALPHA_LOW = 0.01
+# Reward coefficients (from thesis, scaled up from 0.01 to be meaningful)
+# Original 0.01 produced ~0.01 total shaping per step vs -5 to -10 game penalty
+ALPHA_HIGH = 0.1    # FAI contribution
+ALPHA_MID = 0.1     # PPR contribution
+ALPHA_LOW = 0.05    # RCI contribution
+ALPHA_PROG = 0.2    # Ball progression dense reward
 
 # Maximum possible deviation (diagonal of the pitch)
 D_MAX = 2.24  # sqrt(2^2 + 1.2^2) ≈ 2.33, use 2.24 as practical max
+
+# Ball progression: x-delta thresholds
+PROG_STEP_REWARD = 0.5      # Reward per significant forward ball movement
+PROG_STEP_THRESHOLD = 0.02  # Min x-delta to count as progression
 
 
 def compute_formation_targets(
@@ -103,6 +110,52 @@ def compute_fai(
 
 
 # ---------------------------------------------------------------------------
+# Ball Progression Reward (dense signal for moving ball forward)
+# ---------------------------------------------------------------------------
+class BallProgressionTracker:
+    """Track ball x-position across timesteps for progression reward.
+
+    Provides dense reward signal: reward when ball moves forward (positive Δx).
+    This is critical because game reward is extremely sparse (only on goals).
+    """
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._prev_ball_x = None
+        self.total_progression = 0.0
+
+    def update(self, game_state: Dict) -> float:
+        """Compute ball progression reward for current step.
+
+        Returns positive reward when ball moves toward opponent goal (x increases).
+        Returns small negative reward when ball moves backward (x decreases).
+        """
+        ball_pos = get_ball_position(game_state)
+        ball_x = ball_pos[0]
+
+        if self._prev_ball_x is None:
+            self._prev_ball_x = ball_x
+            return 0.0
+
+        delta_x = ball_x - self._prev_ball_x
+        self._prev_ball_x = ball_x
+
+        # Progressive reward: scale by magnitude, cap extremes
+        if delta_x > PROG_STEP_THRESHOLD:
+            # Ball moving forward: positive reward
+            reward = min(PROG_STEP_REWARD * (delta_x / PROG_STEP_THRESHOLD), 1.0)
+            self.total_progression += reward
+            return reward
+        elif delta_x < -PROG_STEP_THRESHOLD:
+            # Ball moving backward: small penalty
+            reward = max(-0.2 * (abs(delta_x) / PROG_STEP_THRESHOLD), -0.5)
+            self.total_progression += reward
+            return reward
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Progressive Pass Ratio (PPR) - PPR(t)
 # ---------------------------------------------------------------------------
 class PassTracker:
@@ -112,7 +165,6 @@ class PassTracker:
 
     A pass is progressive if ball moves forward (Δx > 0 toward opponent goal).
     """
-
     def __init__(self):
         self.reset()
 
@@ -185,7 +237,6 @@ class RCITracker:
 
     Computes running average of f_cat(action, ideal_action) for each agent.
     """
-
     def __init__(self, num_agents: int = 11):
         self.num_agents = num_agents
         self.reset()
@@ -234,10 +285,11 @@ def compute_hierarchical_reward(
     pass_tracker: PassTracker,
     rci_tracker: RCITracker,
     num_agents: int = 11,
+    ball_progression_tracker: Optional[BallProgressionTracker] = None,
 ) -> Tuple[float, Dict[str, float]]:
     """Compute combined hierarchical reward.
 
-    R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t)
+    R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t) + α_P·progression(t)
 
     Returns:
         total_reward, breakdown_dict
@@ -253,12 +305,18 @@ def compute_hierarchical_reward(
     rci_per_agent = rci_tracker.get_rci_per_agent()
     avg_rci = float(np.mean(rci_per_agent))
 
+    # Ball progression (dense signal)
+    r_progression = 0.0
+    if ball_progression_tracker is not None:
+        r_progression = ball_progression_tracker.update(game_state)
+
     # Combined reward
     r_high = ALPHA_HIGH * rho_fa
     r_mid = ALPHA_MID * ppr
     r_low = ALPHA_LOW * avg_rci
+    r_prog = ALPHA_PROG * r_progression
 
-    total = game_reward + r_high + r_mid + r_low
+    total = game_reward + r_high + r_mid + r_low + r_prog
 
     breakdown = {
         'game_reward': game_reward,
@@ -268,6 +326,7 @@ def compute_hierarchical_reward(
         'r_high': r_high,
         'r_mid': r_mid,
         'r_low': r_low,
+        'r_progression': r_prog,
         'total': total,
     }
 

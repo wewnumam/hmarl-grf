@@ -201,19 +201,22 @@ def layer2_components():
 
     # -- Reward computation --
     def test_reward():
-        from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+        from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
         gs = _make_mock_game_state()
         pt = PassTracker()
         rt = RCITracker(11)
+        bpt = BallProgressionTracker()
         total, breakdown = compute_hierarchical_reward(
             game_reward=1.0, game_state=gs,
             actual_actions=[5]*11, ideal_actions=[5]*11,
             pass_tracker=pt, rci_tracker=rt,
+            ball_progression_tracker=bpt,
         )
         assert isinstance(total, float)
         assert 'fai' in breakdown
         assert 'ppr' in breakdown
         assert 'rci_avg' in breakdown
+        assert 'r_progression' in breakdown
     check("reward computation", test_reward)
 
     # -- FAI --
@@ -334,7 +337,7 @@ def layer2b_mock_pipeline():
         SubGoalEmbedding, SUBGOAL_EMBED_DIM,
     )
     from hmarl.expert import ExpertPolicyAllAgents
-    from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+    from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
     from train import RolloutBuffer
 
     set_seed(42)
@@ -372,6 +375,7 @@ def layer2b_mock_pipeline():
     buffer = RolloutBuffer(capacity=NUM_STEPS)
     pass_tracker = PassTracker()
     rci_tracker = RCITracker(NUM_AGENTS)
+    ball_prog_tracker = BallProgressionTracker()
 
     # run mock episode
     game_state = mock_gs(0)
@@ -409,6 +413,7 @@ def layer2b_mock_pipeline():
         total_r, _ = compute_hierarchical_reward(
             reward, new_game_state, joint_actions, ideal_actions,
             pass_tracker, rci_tracker,
+            ball_progression_tracker=ball_prog_tracker,
         )
         buffer.fill_timestep_reward(total_r / NUM_AGENTS)
         episode_reward += total_r
@@ -463,6 +468,210 @@ def layer2b_mock_pipeline():
 
 
 # ---------------------------------------------------------------------------
+# Layer 2c: Script unit tests (eval, validate_rci, stat_test, ablation)
+# ---------------------------------------------------------------------------
+def layer2c_script_tests():
+    print("\n=== Layer 2c: Script Unit Tests ===")
+    scripts_dir = str(Path(__file__).resolve().parent)
+    sys.path.insert(0, scripts_dir)
+
+    # -- eval.py: _extract_dict_from_simple --
+    def test_extract_dict_from_simple():
+        import numpy as np
+        from eval import _extract_dict_from_simple
+        # Build a flat array matching the GRF simple obs layout:
+        # [0:3] ball xyz, [3:9] ball misc, [9] owned_team, [10] owned_player,
+        # then 11 players * 10 fields each
+        flat = np.zeros(121, dtype=np.float32)
+        flat[0], flat[1], flat[2] = 0.5, -0.3, 0.1  # ball xyz
+        flat[9] = 1.0   # ball owned team
+        flat[10] = 3.0  # ball owned player
+        # Player 0: idx=12 x, 13 y, 14-17 skip, 18 role
+        flat[12], flat[13] = -0.95, 0.0
+        flat[18] = 0.0   # GK role
+        # Player 5 (DM): idx=52 x, 53 y, 58 role
+        flat[52], flat[53] = -0.1, 0.0
+        flat[58] = 4.0   # DM role
+        result = _extract_dict_from_simple(flat.reshape(1, -1))
+        assert result['ball'][0] == 0.5
+        assert result['ball_owned_team'] == 1
+        assert result['ball_owned_player'] == 3
+        assert len(result['left_team']) == 11
+        # np.float32 → float64 precision: compare with tolerance
+        assert abs(result['left_team'][0][0] - (-0.95)) < 1e-5
+        assert abs(result['left_team'][0][1] - 0.0) < 1e-5
+        assert result['left_team_roles'][0] == 0
+        assert result['left_team_roles'][5] == 4
+    check("eval._extract_dict_from_simple", test_extract_dict_from_simple)
+
+    # -- eval.py: get_obs_vector --
+    def test_eval_get_obs_vector():
+        import numpy as np
+        from eval import get_obs_vector
+        from hmarl.utils import OBS_DIM
+        gs = _make_mock_game_state()
+        vec = get_obs_vector(gs, 0)
+        assert vec.shape == (OBS_DIM,), f"obs dim: {vec.shape}"
+        assert not np.any(np.isnan(vec)), "NaN in obs vector"
+    check("eval.get_obs_vector", test_eval_get_obs_vector)
+
+    # -- validate_rci.py: construct_validity --
+    def test_construct_validity():
+        import numpy as np
+        from validate_rci import construct_validity
+        # Build per-episode metrics with known correlation
+        np.random.seed(0)
+        n = 20
+        rci_cat = np.random.uniform(0.3, 0.9, n).tolist()
+        fai = [v + np.random.normal(0, 0.05) for v in rci_cat]  # positive corr
+        entropy = [1.0 - v + np.random.normal(0, 0.05) for v in rci_cat]  # negative corr
+        compactness = [1.0 - v + np.random.normal(0, 0.05) for v in rci_cat]
+        psr = rci_cat  # positive corr
+        ppr = rci_cat  # positive corr
+        win_rate = [100.0 if v > 0.6 else 0.0 for v in rci_cat]
+        metrics = {
+            'rci_cat': rci_cat, 'fai_mean': fai,
+            'positional_entropy': entropy, 'compactness_mean': compactness,
+            'psr': psr, 'ppr': ppr, 'win_rate': win_rate,
+        }
+        result = construct_validity(metrics)
+        assert len(result) > 0, "no pairs tested"
+        # rci_cat↔fai should be positive
+        pair = result.get('rci_cat↔fai_mean', {})
+        assert pair.get('pearson_r', 0) > 0, f"expected positive r, got {pair.get('pearson_r')}"
+        # rci_cat↔entropy should be negative
+        pair = result.get('rci_cat↔positional_entropy', {})
+        assert pair.get('pearson_r', 0) < 0, f"expected negative r, got {pair.get('pearson_r')}"
+    check("validate_rci.construct_validity", test_construct_validity)
+
+    # -- validate_rci.py: discrimination_validity --
+    def test_discrimination_validity():
+        from validate_rci import discrimination_validity
+        hmarl = [0.85, 0.90, 0.88, 0.92, 0.87]
+        random_vals = [0.10, 0.12, 0.08, 0.11, 0.09]
+        result = discrimination_validity(hmarl, random_vals, 'random')
+        assert result['hmarl_mean'] > result['baseline_mean']
+        assert result['n_hmarl'] == 5
+        assert result['n_baseline'] == 5
+        # Should have t_statistic since we have enough data
+        assert 't_statistic' in result, f"missing t_statistic in {result.keys()}"
+        assert result['significant'], "expected significant difference"
+    check("validate_rci.discrimination_validity", test_discrimination_validity)
+
+    # -- validate_rci.py: internal_consistency --
+    def test_internal_consistency():
+        from validate_rci import internal_consistency
+        data = {
+            'hmarl': [0.85, 0.88, 0.90],  # CV ~ 3%
+            'random': [0.10, 0.11, 0.09],  # CV ~ 10%
+        }
+        result = internal_consistency(data)
+        assert 'hmarl' in result
+        assert 'random' in result
+        assert result['hmarl']['cv_percent'] < 15.0, "hmarl CV should be < 15%"
+        assert result['hmarl']['consistent']
+    check("validate_rci.internal_consistency", test_internal_consistency)
+
+    # -- validate_rci.py: run_full_validation --
+    def test_run_full_validation():
+        import numpy as np
+        from validate_rci import run_full_validation
+        np.random.seed(42)
+        n = 10
+        per_seed = {
+            'hmarl': {
+                'rci_cat': np.random.uniform(0.7, 0.95, n).tolist(),
+                'rci_strict': np.random.uniform(0.6, 0.9, n).tolist(),
+                'fai_mean': np.random.uniform(0.7, 0.95, n).tolist(),
+                'positional_entropy': np.random.uniform(0.5, 1.5, n).tolist(),
+                'compactness_mean': np.random.uniform(0.1, 0.3, n).tolist(),
+                'psr': np.random.uniform(0.3, 0.7, n).tolist(),
+                'ppr': np.random.uniform(0.2, 0.5, n).tolist(),
+                'win_rate': np.random.uniform(0, 100, n).tolist(),
+            },
+            'random': {
+                'rci_cat': [0.0] * n,
+                'rci_strict': [0.0] * n,
+                'fai_mean': [0.0] * n,
+                'positional_entropy': [0.0] * n,
+                'compactness_mean': [0.0] * n,
+                'psr': [0.0] * n,
+                'ppr': [0.0] * n,
+                'win_rate': [0.0] * n,
+            },
+        }
+        report = run_full_validation(per_seed)
+        assert 'construct_validity' in report
+        assert 'discrimination_validity' in report
+        assert 'internal_consistency' in report
+    check("validate_rci.run_full_validation", test_run_full_validation)
+
+    # -- stat_test.py: run_statistical_test --
+    def test_run_statistical_test():
+        from stat_test import run_statistical_test
+        hmarl = [0.8, 0.85, 0.9, 0.87, 0.92]
+        baseline = [0.3, 0.25, 0.35, 0.28, 0.30]
+        result = run_statistical_test(hmarl, baseline, 'ippo')
+        assert result['baseline'] == 'ippo'
+        assert result['n_seeds'] == 5
+        assert 'u_statistic' in result or 'test' in result
+    check("stat_test.run_statistical_test", test_run_statistical_test)
+
+    # -- sweep.py: import check --
+    def test_sweep_import():
+        import importlib
+        try:
+            mod = importlib.import_module("sweep")
+            assert hasattr(mod, "evaluate_policy")
+            assert hasattr(mod, "objective")
+        except SystemExit:
+            # optuna not installed — skip gracefully
+            pass
+    check("sweep imports", test_sweep_import)
+
+    # -- ablation.py: make_custom_reward --
+    def test_make_custom_reward():
+        import numpy as np
+        from ablation import make_custom_reward
+        from hmarl.reward import PassTracker, RCITracker
+        gs = _make_mock_game_state()
+        gs['ball_owned_team'] = 0
+        gs['ball'] = [0.0, 0.0, 0.0]
+
+        # All components on
+        reward_fn = make_custom_reward(alpha_h=1.0, alpha_m=1.0, alpha_l=1.0,
+                                       use_fai=True, use_ppr=True, use_rci=True)
+        pt = PassTracker()
+        rt = RCITracker(11)
+        actual = [5]*11
+        ideal = [5]*11
+        total, breakdown = reward_fn(1.0, gs, actual, ideal, pt, rt)
+        assert isinstance(total, float)
+        assert 'fai' in breakdown
+        assert 'ppr' in breakdown
+        assert 'rci_avg' in breakdown
+
+        # All components off
+        reward_fn_off = make_custom_reward(alpha_h=0.0, alpha_m=0.0, alpha_l=0.0,
+                                           use_fai=False, use_ppr=False, use_rci=False)
+        pt2 = PassTracker()
+        rt2 = RCITracker(11)
+        total2, breakdown2 = reward_fn_off(1.0, gs, actual, ideal, pt2, rt2)
+        assert total2 == 1.0, f"expected game_reward only, got {total2}"
+        assert breakdown2['fai'] == 0.0
+        assert breakdown2['ppr'] == 0.0
+        assert breakdown2['rci_avg'] == 0.0
+    check("ablation.make_custom_reward", test_make_custom_reward)
+
+    # -- ablation.py: import check --
+    def test_ablation_import():
+        from ablation import ABLATION_CONFIGS
+        assert isinstance(ABLATION_CONFIGS, dict), "ABLATION_CONFIGS should be dict"
+        assert len(ABLATION_CONFIGS) >= 5, f"expected >=5 configs, got {len(ABLATION_CONFIGS)}"
+    check("ablation.ABLATION_CONFIGS", test_ablation_import)
+
+
+# ---------------------------------------------------------------------------
 # Layer 3: Full GRF integration (--full flag, needs Docker env)
 # ---------------------------------------------------------------------------
 def layer3_full_integration():
@@ -478,7 +687,7 @@ def layer3_full_integration():
         SubGoalEmbedding, SUBGOAL_EMBED_DIM,
     )
     from hmarl.expert import ExpertPolicyAllAgents
-    from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+    from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
     from hmarl.metrics import compute_win_rate
 
     set_seed(42)
@@ -515,6 +724,7 @@ def layer3_full_integration():
         gs = extract_game_state(obs_raw)
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
 
         steps_done = 0
         prev_gs = None
@@ -555,6 +765,7 @@ def layer3_full_integration():
             tr, _ = compute_hierarchical_reward(
                 float(np.sum(game_reward)), new_gs, joint_actions, ideals,
                 pass_tracker, rci_tracker,
+                ball_progression_tracker=ball_prog_tracker,
             )
             total_reward += tr
             prev_gs = gs
@@ -581,6 +792,7 @@ def layer3_full_integration():
         buffer = RolloutBuffer(capacity=50)
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
 
         policy.train()
         subgoal_embedding.train()
@@ -621,6 +833,7 @@ def layer3_full_integration():
             tr, _ = compute_hierarchical_reward(
                 float(np.sum(game_reward)), new_gs, joint_actions, ideals,
                 pass_tracker, rci_tracker,
+                ball_progression_tracker=ball_prog_tracker,
             )
             buffer.fill_timestep_reward(tr / NUM_AGENTS)
             if done:
@@ -715,6 +928,7 @@ def main():
     # Layer 2
     layer2_components()
     layer2b_mock_pipeline()
+    layer2c_script_tests()
 
     # Layer 3 (optional)
     if full:

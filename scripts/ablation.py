@@ -39,7 +39,7 @@ from hmarl.policy import (
 )
 from hmarl.expert import ExpertPolicyAllAgents
 from hmarl.reward import (
-    PassTracker, RCITracker, compute_hierarchical_reward,
+    PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward,
     compute_fai, ALPHA_HIGH, ALPHA_MID, ALPHA_LOW,
 )
 from hmarl.metrics import compute_win_rate, compute_goal_difference, compute_all_metrics, print_metrics
@@ -63,18 +63,25 @@ _orig_compute = reward_mod.compute_hierarchical_reward
 def make_custom_reward(alpha_h=ALPHA_HIGH, alpha_m=ALPHA_MID, alpha_l=ALPHA_LOW,
                        use_fai=True, use_ppr=True, use_rci=True):
     """Create a reward function with specified components enabled/disabled."""
+    from hmarl.reward import ALPHA_PROG
     def custom_reward(game_reward, game_state, actual_actions, ideal_actions,
-                      pass_tracker, rci_tracker, num_agents=11):
+                      pass_tracker, rci_tracker, num_agents=11,
+                      ball_progression_tracker=None):
         rho_fa = compute_fai(game_state, num_agents) if use_fai else 0.0
         ppr = pass_tracker.get_ppr() if use_ppr else 0.0
         rci_tracker.update(actual_actions, ideal_actions)
         rci_per_agent = rci_tracker.get_rci_per_agent()
         avg_rci = float(np.mean(rci_per_agent)) if use_rci else 0.0
 
+        r_progression = 0.0
+        if ball_progression_tracker is not None:
+            r_progression = ball_progression_tracker.update(game_state)
+
         r_high = alpha_h * rho_fa
         r_mid = alpha_m * ppr
         r_low = alpha_l * avg_rci
-        total = game_reward + r_high + r_mid + r_low
+        r_prog = ALPHA_PROG * r_progression
+        total = game_reward + r_high + r_mid + r_low + r_prog
 
         breakdown = {'game_reward': game_reward, 'fai': rho_fa, 'ppr': ppr,
                      'rci_avg': avg_rci, 'r_high': r_high, 'r_mid': r_mid,
@@ -106,17 +113,10 @@ def train_hmarl_config(
 
     subgoal_embedding = SubGoalEmbedding().to(DEVICE)
 
-    if flat_policy:
-        # Flat policy: no sub-goal conditioning, just obs -> action
-        policy = HierarchicalActorCritic(
-            obs_dim=OBS_DIM, subgoal_embed_dim=SUBGOAL_EMBED_DIM,
-            hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
-        ).to(DEVICE)
-    else:
-        policy = HierarchicalActorCritic(
-            obs_dim=OBS_DIM, subgoal_embed_dim=SUBGOAL_EMBED_DIM,
-            hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
-        ).to(DEVICE)
+    policy = HierarchicalActorCritic(
+        obs_dim=OBS_DIM, subgoal_embed_dim=SUBGOAL_EMBED_DIM,
+        hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
+    ).to(DEVICE)
 
     params = list(policy.parameters()) + list(subgoal_embedding.parameters())
     optimizer = optim.Adam(params, lr=3e-4, eps=1e-5)
@@ -138,6 +138,7 @@ def train_hmarl_config(
         game_state = extract_game_state(obs_raw)
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
 
         ep_reward = 0.0
         observations.clear()
@@ -203,6 +204,7 @@ def train_hmarl_config(
             total_reward, _ = reward_fn(
                 team_reward, new_game_state, joint_actions, ideal_actions,
                 pass_tracker, rci_tracker,
+                ball_progression_tracker=ball_prog_tracker,
             )
 
             # Fill rewards for all agents in this timestep

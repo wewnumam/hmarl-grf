@@ -37,7 +37,7 @@ from hmarl.policy import (
     SubGoalEmbedding, SUBGOAL_EMBED_DIM,
 )
 from hmarl.expert import ExpertPolicyAllAgents
-from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
 from hmarl.metrics import _convex_hull_area_numpy
 from hmarl.metrics import (
     compute_all_metrics, print_metrics,
@@ -135,7 +135,7 @@ def evaluate_hmarl(
     all_goals_against = []
     all_rewards = []
     ep_reward_components = []  # per-episode reward component sums
-    ep_episode_rc = {'game_reward': 0.0, 'r_high': 0.0, 'r_mid': 0.0, 'r_low': 0.0}
+    ep_episode_rc = {'game_reward': 0.0, 'r_high': 0.0, 'r_mid': 0.0, 'r_low': 0.0, 'r_progression': 0.0}
 
     # Aggregate actions/states for RCI across all episodes
     all_actual_actions_flat = []
@@ -160,8 +160,9 @@ def evaluate_hmarl(
 
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
         episode_reward = 0.0
-        ep_episode_rc = {'game_reward': 0.0, 'r_high': 0.0, 'r_mid': 0.0, 'r_low': 0.0}
+        ep_episode_rc = {'game_reward': 0.0, 'r_high': 0.0, 'r_mid': 0.0, 'r_low': 0.0, 'r_progression': 0.0}
         episode_actual_actions = []
         episode_ideal_actions = []
         episode_game_states = []
@@ -229,6 +230,7 @@ def evaluate_hmarl(
             total_reward, reward_breakdown = compute_hierarchical_reward(
                 team_reward, new_game_state, joint_actions, ideal_actions,
                 pass_tracker, rci_tracker,
+                ball_progression_tracker=ball_prog_tracker,
             )
 
             episode_reward += total_reward
@@ -286,6 +288,23 @@ def evaluate_hmarl(
     metrics['cumulative_reward'] = sum(all_rewards)
     metrics['num_episodes'] = num_episodes
 
+    # Action distribution analysis (detect mode collapse)
+    if all_actual_actions_flat:
+        from collections import Counter
+        action_counter = Counter()
+        for timestep in all_actual_actions_flat:
+            for a in timestep:
+                action_counter[a] += 1
+        total_actions = sum(action_counter.values())
+        action_dist = {str(k): v / total_actions for k, v in action_counter.items()}
+        metrics['action_distribution'] = action_dist
+        metrics['action_entropy'] = float(-sum(
+            p * np.log(p + 1e-10) for p in action_dist.values()
+        ))
+        metrics['dominant_action_pct'] = max(action_dist.values()) * 100
+        print(f"\nAction distribution: entropy={metrics['action_entropy']:.3f}, "
+              f"dominant action={metrics['dominant_action_pct']:.1f}%")
+
     # Print results
     print_metrics(metrics, "HMARL")
 
@@ -323,6 +342,7 @@ def evaluate_hmarl(
         'r_high': [d['r_high'] for d in ep_reward_components],
         'r_mid': [d['r_mid'] for d in ep_reward_components],
         'r_low': [d['r_low'] for d in ep_reward_components],
+        'r_progression': [d.get('r_progression', 0.0) for d in ep_reward_components],
     }
     with open(rc_path, 'w') as f:
         json.dump(rc_data, f)
@@ -478,6 +498,7 @@ def evaluate_random_baseline(
 
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
         episode_reward = 0.0
         episode_actions = []
         episode_ideals = []
@@ -511,6 +532,7 @@ def evaluate_random_baseline(
             total_reward, reward_breakdown = compute_hierarchical_reward(
                 team_reward, new_gs, joint_actions, ideal_actions,
                 pass_tracker, rci_tracker,
+                ball_progression_tracker=ball_prog_tracker,
             )
 
             episode_reward += total_reward
@@ -523,7 +545,7 @@ def evaluate_random_baseline(
             step += 1
 
         score = game_state.get('score', [0, 0])
-        gf, ga = score[0], score[1] if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
+        gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         result = 'win' if gf > ga else ('loss' if gf < ga else 'draw')
 
         all_match_results.append(result)

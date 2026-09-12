@@ -46,7 +46,7 @@ from hmarl.policy import (
     STRATEGY_POSSESSION,
 )
 from hmarl.expert import ExpertPolicyAllAgents
-from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
 from hmarl.metrics import (
     compute_win_rate, compute_goal_difference,
     pass_success_ratio, progressive_pass_ratio,
@@ -242,6 +242,7 @@ class HMARLTrainer:
         # Trackers
         self.pass_tracker = PassTracker()
         self.rci_tracker = RCITracker(num_agents=NUM_AGENTS)
+        self.ball_progression_tracker = BallProgressionTracker()
 
         # Logging
         self.writer = SummaryWriter(log_dir=f"{log_dir}/hmarl_runs")
@@ -287,6 +288,7 @@ class HMARLTrainer:
 
         self.pass_tracker.reset()
         self.rci_tracker.reset()
+        self.ball_progression_tracker.reset()
 
         episode_reward = 0.0
         episode_steps = 0
@@ -372,6 +374,7 @@ class HMARLTrainer:
                 ideal_actions=ideal_actions,
                 pass_tracker=self.pass_tracker,
                 rci_tracker=self.rci_tracker,
+                ball_progression_tracker=self.ball_progression_tracker,
             )
 
             # Update buffer rewards (per-agent share of team reward)
@@ -420,6 +423,7 @@ class HMARLTrainer:
             'all_ideal_actions': all_ideal_actions,
             'all_game_states': all_game_states,
             'reward_breakdown': reward_breakdown,
+            'ball_progression_total': self.ball_progression_tracker.total_progression,
         }
 
     def _ppo_update(self):
@@ -496,6 +500,8 @@ class HMARLTrainer:
             'episode_compactness': [],
             'episode_goals_for': [],
             'episode_goals_against': [],
+            'episode_ball_progression': [],
+            'episode_action_distribution': [],  # [counts per action] per episode
         }
 
     def _append_training_log(self, stats: Dict):
@@ -534,6 +540,19 @@ class HMARLTrainer:
             self._train_log['episode_fai'].append(0.0)
             self._train_log['episode_ppr'].append(0.0)
             self._train_log['episode_compactness'].append(0.0)
+
+        # Ball progression (sum of ball x-delta over episode)
+        ball_prog = stats.get('ball_progression_total', 0.0)
+        self._train_log['episode_ball_progression'].append(float(ball_prog))
+
+        # Action distribution: count of each action across all agents in episode
+        all_actions = stats.get('all_actual_actions', [])
+        action_counts = [0] * 19
+        for timestep_actions in all_actions:
+            for a in timestep_actions:
+                if 0 <= a < 19:
+                    action_counts[a] += 1
+        self._train_log['episode_action_distribution'].append(action_counts)
 
     def _save_training_log(self):
         """Save training log to JSON for visualization."""
@@ -760,7 +779,7 @@ class HMARLTrainer:
                 step += 1
 
             score = game_state.get('score', [0, 0])
-            gf, ga = score[0], score[1] if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
+            gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
             if gf > ga:
                 wins += 1
             total_goals_for += gf

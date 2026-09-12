@@ -82,8 +82,8 @@ def construct_validity(
     for metric_a, metric_b, expected_dir in pairs_spec:
         if metric_a not in per_episode_metrics or metric_b not in per_episode_metrics:
             continue
-        arr_a = np.array(per_episode_metrics[metric_a])
-        arr_b = np.array(per_episode_metrics[metric_b])
+        arr_a = np.array([v for v in per_episode_metrics[metric_a] if isinstance(v, (int, float)) and not np.isnan(v)])
+        arr_b = np.array([v for v in per_episode_metrics[metric_b] if isinstance(v, (int, float)) and not np.isnan(v)])
         n = min(len(arr_a), len(arr_b))
         if n < 3:
             results[f'{metric_a}↔{metric_b}'] = {
@@ -283,12 +283,8 @@ def sensitivity_analysis(
         from hmarl.expert import ExpertPolicyAllAgents, ExpertPolicy, D_TACKLE, D_SAFE, D_SHOOT
         from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
         from hmarl.rci import compute_rci
-        from hmarl.utils import set_seed, extract_obs_vector
+        from hmarl.utils import set_seed, extract_obs_vector, HIDDEN_DIM, HEAD_DIM, OBS_DIM, EPISODE_MAX_STEPS
 
-        HIDDEN_DIM = 256
-        HEAD_DIM = 128
-        OBS_DIM = 115
-        EPISODE_MAX_STEPS = 3000
         DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Load trained HMARL model
@@ -465,8 +461,11 @@ def run_full_validation(
                 print(f"\n  HMARL vs {model.upper()}:")
                 print(f"    HMARL:  {test_result['hmarl_mean']:.4f} ± {test_result['hmarl_std']:.4f} (n={test_result['n_hmarl']})")
                 print(f"    {model:8s}: {test_result['baseline_mean']:.4f} ± {test_result['baseline_std']:.4f} (n={test_result['n_baseline']})")
-                print(f"    t={test_result['t_statistic']:.4f}, p={test_result['p_value_one_sided']:.6f}")
-                print(f"    → {test_result['interpretation']}")
+                if 't_statistic' in test_result:
+                    print(f"    t={test_result['t_statistic']:.4f}, p={test_result['p_value_one_sided']:.6f}")
+                    print(f"    → {test_result['interpretation']}")
+                else:
+                    print(f"    Skipped: {test_result.get('reason', test_result.get('status', 'unknown'))}")
 
     # --- 3. Internal Consistency ---
     print("\n" + "=" * 60)
@@ -689,8 +688,11 @@ def main():
                         else:
                             seed_metrics[key].append(0.0)
 
-                    print(f"    Seed {s+1}: RCI_cat={metrics.get('rci_cat', 'N/A'):.4f} "
-                          f"WR={metrics.get('win_rate', 0):.1f}%")
+                    rci_val = metrics.get('rci_cat')
+                    rci_str = f"{rci_val:.4f}" if isinstance(rci_val, (int, float)) and not np.isnan(rci_val) else "N/A"
+                    wr_val = metrics.get('win_rate', 0)
+                    wr_str = f"{wr_val:.1f}%" if isinstance(wr_val, (int, float)) else "N/A"
+                    print(f"    Seed {s+1}: RCI_cat={rci_str}, WR={wr_str}")
 
                 except Exception as e:
                     traceback.print_exc()

@@ -34,15 +34,44 @@ import matplotlib.gridspec as gridspec
 # ---------------------------------------------------------------------------
 # Style configuration
 # ---------------------------------------------------------------------------
-# Academic color palette (grayscale-friendly, colorblind-safe)
+# Wong (2011) colorblind-safe palette
 COLORS = {
-    'hmarl': '#2c3e50',       # Dark blue-gray
-    'ippo': '#7f8c8d',        # Medium gray
-    'shppo': '#95a5a6',       # Light gray
-    'random': '#bdc3c7',      # Pale gray
-    'accent': '#e74c3c',      # Red accent
-    'secondary': '#3498db',   # Blue accent
-    'tertiary': '#2ecc71',    # Green accent
+    'hmarl': '#0072B2',    # Blue (primary — proposed method)
+    'shppo': '#D55E00',    # Vermillion (strongest baseline)
+    'mappo': '#CC79A7',    # Reddish purple
+    'ippo': '#009E73',     # Bluish green
+    'random': '#999999',   # Gray (neutral, weakest baseline)
+    'accent': '#E69F00',   # Orange (for highlights)
+    'secondary': '#56B4E9', # Sky blue
+    'tertiary': '#F0E442', # Yellow (for accents only)
+}
+
+# Stable color mapping for methods — consistent across ALL figures
+METHOD_COLORS = {
+    'HMARL': COLORS['hmarl'],
+    'SHPPO': COLORS['shppo'],
+    'MAPPO': COLORS['mappo'],
+    'IPPO': COLORS['ippo'],
+    'Random': COLORS['random'],
+    'Full HMARL': COLORS['hmarl'],
+}
+
+# Stable line styles for method distinction (training curves)
+METHOD_LINESTYLES = {
+    'HMARL': '-',
+    'SHPPO': '--',
+    'MAPPO': ':',
+    'IPPO': '-.',
+    'Random': (0, (1, 3)),  # dotted
+}
+
+# Stable markers for methods
+METHOD_MARKERS = {
+    'HMARL': 'o',
+    'SHPPO': 's',
+    'MAPPO': 'D',
+    'IPPO': '^',
+    'Random': 'v',
 }
 
 # Pattern fills for black-and-white printing
@@ -83,7 +112,7 @@ MACRO_STRATEGIES = {0: 'High\nPressing', 1: 'Counter\nAttack', 2: 'Possession\nP
 
 
 def _apply_style():
-    """Apply clean academic plotting style."""
+    """Apply clean academic plotting style for thesis figures."""
     plt.rcParams.update({
         'font.family': 'serif',
         'font.size': 10,
@@ -91,7 +120,7 @@ def _apply_style():
         'axes.titlesize': 12,
         'xtick.labelsize': 9,
         'ytick.labelsize': 9,
-        'legend.fontsize': 9,
+        'legend.fontsize': 8,
         'figure.dpi': 150,
         'savefig.dpi': 300,
         'savefig.bbox': 'tight',
@@ -103,7 +132,29 @@ def _apply_style():
         'axes.spines.right': False,
         'lines.linewidth': 1.5,
         'lines.markersize': 5,
+        'lines.markeredgewidth': 0.5,
+        'legend.frameon': True,
+        'legend.framealpha': 0.9,
+        'legend.edgecolor': '#cccccc',
+        'mathtext.fontset': 'cm',
+        'text.usetex': False,
     })
+
+
+def _get_method_style(model_name: str) -> dict:
+    """Return consistent color, linestyle, and marker for a model name."""
+    # Normalize name
+    name_upper = model_name.upper()
+    name_map = {
+        'HMARL': 'HMARL', 'IPPO': 'IPPO', 'SHppo': 'SHPPO',
+        'MAPPO': 'MAPPO', 'RANDOM': 'Random', 'RANDOM BASELINE': 'Random',
+        'FULL HMARL': 'Full HMARL', 'FULL_HMARL': 'Full HMARL',
+    }
+    key = name_map.get(name_upper, model_name)
+    color = METHOD_COLORS.get(key, COLORS.get(model_name.lower(), '#333333'))
+    ls = METHOD_LINESTYLES.get(key, '-')
+    marker = METHOD_MARKERS.get(key, 'o')
+    return {'color': color, 'linestyle': ls, 'marker': marker}
 
 
 def _rolling_mean(data: List[float], window: int = 10) -> np.ndarray:
@@ -139,38 +190,35 @@ def plot_learning_curve(
 
     Args:
         data: dict mapping model_name -> list of episode rewards
-              e.g. {'HMARL': [...], 'IPPO': [...], 'SHPPO': [...]}
         output_path: path to save the figure
         window: rolling average window size
-        title: plot title
+        title: plot title (ignored for thesis figures — use caption instead)
     """
     _apply_style()
     fig, ax = plt.subplots(figsize=(8, 4.5))
 
-    color_keys = list(COLORS.keys())
-    pattern_keys = list(PATTERNS.keys())
-
-    for idx, (model, rewards) in enumerate(data.items()):
-        key = color_keys[idx % len(color_keys)]
-        color = COLORS[key]
+    for model, rewards in data.items():
+        style = _get_method_style(model)
         episodes = np.arange(1, len(rewards) + 1)
 
         if len(rewards) >= window:
             smoothed = _rolling_mean(rewards, window)
             std = _rolling_std(rewards, window)
             x = episodes[window - 1:]
-            ax.plot(x, smoothed, color=color, label=model, linewidth=1.5)
+            ax.plot(x, smoothed, color=style['color'], linestyle=style['linestyle'],
+                    label=model, linewidth=1.5)
             ax.fill_between(x, smoothed - std, smoothed + std,
-                           alpha=0.15, color=color)
+                           alpha=0.12, color=style['color'])
         else:
-            ax.plot(episodes, rewards, color=color, label=model, linewidth=1.5)
+            ax.plot(episodes, rewards, color=style['color'],
+                    linestyle=style['linestyle'], label=model, linewidth=1.5)
 
     ax.set_xlabel('Episode')
     ax.set_ylabel('Cumulative Reward')
-    ax.set_title(title)
-    ax.legend(frameon=True, framealpha=0.9, edgecolor='gray')
+    ax.legend(frameon=True, framealpha=0.9, edgecolor='#cccccc',
+              loc='best')
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -186,23 +234,17 @@ def plot_rci_evolution(
 ):
     """Plot RCI_cat and RCI_strict over episodes for multiple models.
 
-    Args:
-        data: dict mapping model_name -> {'rci_cat': [...], 'rci_strict': [...]}
-        output_path: path to save
-        window: rolling average window
-        title: plot title
+    Uses subfigure labels (a), (b) for thesis integration.
     """
     _apply_style()
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
 
-    color_keys = list(COLORS.keys())
-
-    for idx, (model, rci_data) in enumerate(data.items()):
-        color = COLORS[color_keys[idx % len(color_keys)]]
+    for model, rci_data in data.items():
+        style = _get_method_style(model)
 
         for ax, variant, label in [
-            (ax1, 'rci_cat', 'RCI$_{cat}$'),
-            (ax2, 'rci_strict', 'RCI$_{strict}$'),
+            (ax1, 'rci_cat', r'RCI$_{cat}$'),
+            (ax2, 'rci_strict', r'RCI$_{strict}$'),
         ]:
             values = rci_data.get(variant, [])
             if not values:
@@ -210,25 +252,30 @@ def plot_rci_evolution(
             episodes = np.arange(1, len(values) + 1)
             if len(values) >= window:
                 smoothed = _rolling_mean(values, window)
+                std = _rolling_std(values, window)
                 x = episodes[window - 1:]
-                ax.plot(x, smoothed, color=color, label=model, linewidth=1.5)
+                ax.plot(x, smoothed, color=style['color'],
+                        linestyle=style['linestyle'], label=model, linewidth=1.5)
+                ax.fill_between(x, smoothed - std, smoothed + std,
+                               alpha=0.12, color=style['color'])
             else:
-                ax.plot(episodes, values, color=color, label=model, linewidth=1.5)
+                ax.plot(episodes, values, color=style['color'],
+                        linestyle=style['linestyle'], label=model, linewidth=1.5)
 
-        ax1.set_ylabel('RCI Value')
-        ax1.set_xlabel('Episode')
-        ax2.set_xlabel('Episode')
-        ax1.set_title('Category-based ($RCI_{cat}$)')
-        ax2.set_title('Strict ($RCI_{strict}$)')
-        ax1.set_ylim(-0.05, 1.05)
-
-    for ax in (ax1, ax2):
-        ax.legend(frameon=True, framealpha=0.9, edgecolor='gray')
+    for ax, label in [(ax1, '(a)'), (ax2, '(b)')]:
+        ax.set_xlabel('Episode')
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend(frameon=True, framealpha=0.9, edgecolor='#cccccc')
         ax.axhline(y=1.0, color='gray', linestyle=':', alpha=0.5, linewidth=0.8)
+        ax.text(0.02, 0.98, label, transform=ax.transAxes, fontsize=11,
+                fontweight='bold', va='top')
 
-    fig.suptitle(title, fontsize=13, y=1.02)
+    ax1.set_ylabel('RCI Value')
+    ax1.set_title(r'Category-based ($RCI_{cat}$)')
+    ax2.set_title(r'Strict ($RCI_{strict}$)')
+
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -241,69 +288,75 @@ def plot_comparative_bars(
     output_path: str,
     title: str = 'Comparative Metrics Evaluation',
 ):
-    """Grouped bar chart for all metrics across models.
+    """Two-panel grouped bar chart for metrics across models.
 
-    Args:
-        data: dict mapping model_name -> {metric_name: value}
-              e.g. {'HMARL': {'wr': 80, 'rci_cat': 0.75, ...}, 'IPPO': {...}}
-        output_path: path to save
-        title: plot title
+    Panel (a): Performance metrics (WR, GD, Cumulative Reward) — separate scales
+    Panel (b): Coordination metrics (PSR, PPR, Entropy, Compactness, FAI, RCI) — normalized to [0,1]
     """
     _apply_style()
 
-    # Define metric groups
-    perf_metrics = ['wr', 'gd', 'cumulative_reward']
-    coord_metrics = ['psr', 'ppr', 'positional_entropy', 'compactness_mean', 'fai_mean']
-    rci_metrics = ['rci_strict', 'rci_cat']
-
-    # Normalize display names
-    display_names = {
-        'wr': 'WR (%)',
-        'gd': 'GD',
-        'cumulative_reward': 'Cum. Reward',
-        'psr': 'PSR (%)',
-        'ppr': 'PPR (%)',
-        'positional_entropy': 'Entropy (H)',
-        'compactness_mean': 'Compactness',
-        'fai_mean': 'FAI',
-        'rci_strict': 'RCI$_{strict}$',
-        'rci_cat': 'RCI$_{cat}$',
-    }
-
-    all_metrics = perf_metrics + coord_metrics + rci_metrics
     models = list(data.keys())
     n_models = len(models)
-    n_metrics = len(all_metrics)
 
-    fig, ax = plt.subplots(figsize=(14, 5))
+    # Panel (a): Performance metrics — keep original scales
+    perf_metrics = ['wr', 'gd', 'cumulative_reward']
+    perf_display = {'wr': 'Win Rate (%)', 'gd': 'Goal Diff.', 'cumulative_reward': 'Cum. Reward'}
 
-    x = np.arange(n_metrics)
-    width = 0.8 / n_models
+    # Panel (b): Coordination metrics — all roughly in [0, 1] range
+    coord_metrics = ['psr', 'ppr', 'positional_entropy', 'compactness_mean', 'fai_mean', 'rci_strict', 'rci_cat']
+    coord_display = {
+        'psr': 'PSR', 'ppr': 'PPR', 'positional_entropy': 'Entropy',
+        'compactness_mean': 'Compactness', 'fai_mean': 'FAI',
+        'rci_strict': r'RCI$_{strict}$', 'rci_cat': r'RCI$_{cat}$',
+    }
 
-    color_keys = list(COLORS.keys())
+    # Normalize coordination metrics to [0, 1] for fair comparison
+    # Each metric is normalized to its observed range across models
+    coord_data_norm = {}
+    for m in coord_metrics:
+        vals = [data[mdl].get(m, 0) for mdl in models]
+        vmin, vmax = min(vals), max(vals)
+        rng = vmax - vmin if vmax != vmin else 1.0
+        coord_data_norm[m] = [(v - vmin) / rng for v in vals]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Panel (a): Performance
+    x_perf = np.arange(len(perf_metrics))
+    width = 0.7 / n_models
     for idx, model in enumerate(models):
-        values = []
-        for m in all_metrics:
-            values.append(data[model].get(m, 0))
+        style = _get_method_style(model)
+        values = [data[model].get(m, 0) for m in perf_metrics]
         offset = (idx - n_models / 2 + 0.5) * width
-        bars = ax.bar(x + offset, values, width, label=model,
-                      color=COLORS[color_keys[idx % len(color_keys)]],
-                      edgecolor='white', linewidth=0.5)
+        ax1.bar(x_perf + offset, values, width, label=model,
+                color=style['color'], edgecolor='white', linewidth=0.5)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([display_names.get(m, m) for m in all_metrics],
-                       rotation=30, ha='right')
-    ax.set_ylabel('Value')
-    ax.set_title(title)
-    ax.legend(frameon=True, framealpha=0.9, edgecolor='gray',
-              ncol=min(n_models, 3))
+    ax1.set_xticks(x_perf)
+    ax1.set_xticklabels([perf_display[m] for m in perf_metrics])
+    ax1.set_ylabel('Value')
+    ax1.legend(frameon=True, framealpha=0.9, edgecolor='#cccccc')
+    ax1.text(0.02, 0.98, '(a) Performance', transform=ax1.transAxes,
+             fontsize=11, fontweight='bold', va='top')
 
-    # Add vertical separators between metric groups
-    for sep in [len(perf_metrics) - 0.5, len(perf_metrics) + len(coord_metrics) - 0.5]:
-        ax.axvline(x=sep, color='gray', linestyle='--', alpha=0.4, linewidth=0.8)
+    # Panel (b): Coordination (normalized)
+    x_coord = np.arange(len(coord_metrics))
+    for idx, model in enumerate(models):
+        style = _get_method_style(model)
+        values = [coord_data_norm[m][idx] for m in coord_metrics]
+        offset = (idx - n_models / 2 + 0.5) * width
+        ax2.bar(x_coord + offset, values, width, label=model,
+                color=style['color'], edgecolor='white', linewidth=0.5)
+
+    ax2.set_xticks(x_coord)
+    ax2.set_xticklabels([coord_display[m] for m in coord_metrics], rotation=30, ha='right')
+    ax2.set_ylabel('Normalized Value [0, 1]')
+    ax2.legend(frameon=True, framealpha=0.9, edgecolor='#cccccc')
+    ax2.set_ylim(0, 1.15)
+    ax2.text(0.02, 0.98, '(b) Coordination', transform=ax2.transAxes,
+             fontsize=11, fontweight='bold', va='top')
 
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -394,17 +447,20 @@ def plot_role_heatmap(
         )
 
         # Plot heatmap
-        im = ax.pcolormesh(xedges, yedges, h.T, cmap='YlOrRd', alpha=0.8)
+        im = ax.pcolormesh(xedges, yedges, h.T, cmap='hot', alpha=0.8)
 
         ax.set_title(f'{role_name} (n={len(px)})', fontsize=10, fontweight='bold')
+
+    # Add subplot label (a) in top-left of first axes
+    axes[0].text(0.02, 0.98, '(a)', transform=axes[0].transAxes,
+                 fontsize=11, fontweight='bold', va='top')
 
     # Remove extra axes
     for j in range(11, len(axes)):
         fig.delaxes(axes[j])
 
-    fig.suptitle(title, fontsize=13, y=1.01)
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -503,7 +559,7 @@ def plot_formation_snapshot(
     ax.legend(loc='upper right', fontsize=8)
 
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -554,7 +610,7 @@ def plot_action_distribution(
 
     x = np.arange(num_agents)
     bottom = np.zeros(num_agents)
-    cat_colors = ['#2c3e50', '#e74c3c', '#3498db', '#f39c12', '#95a5a6']
+    cat_colors = [COLORS['hmarl'], '#E69F00', COLORS['secondary'], COLORS['accent'], '#999999']
 
     for cat_idx in range(n_cats):
         ax.bar(x, percentages[:, cat_idx], bottom=bottom,
@@ -571,10 +627,10 @@ def plot_action_distribution(
     ax.set_xlabel('Player Role')
     ax.set_title(title)
     ax.legend(loc='upper right', frameon=True, framealpha=0.9, fontsize=8)
-    ax.set_ylim(0, 105)
+    ax.set_ylim(0, 100)
 
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -607,7 +663,7 @@ def plot_macro_strategy_timeline(
         return
 
     strategy_labels = ['High Pressing', 'Counter Attack', 'Possession Play']
-    strategy_colors = ['#2c3e50', '#3498db', '#2ecc71']
+    strategy_colors = [COLORS['hmarl'], COLORS['secondary'], COLORS['accent']]
     num_strategies = len(strategy_labels)
 
     # --- Detect single vs multi episode ---
@@ -660,7 +716,7 @@ def plot_macro_strategy_timeline(
 
     ax.set_xlabel('Timestep')
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print('Saved: %s' % output_path)
 
@@ -690,9 +746,9 @@ def plot_compactness_over_time(
     _apply_style()
     fig, ax = plt.subplots(figsize=(10, 4.5))
 
-    color_keys = list(COLORS.keys())
-    for idx, (model, values) in enumerate(data.items()):
-        color = COLORS[color_keys[idx % len(color_keys)]]
+    for model, values in data.items():
+        style = _get_method_style(model)
+        color = style['color']
 
         # --- Detect single vs multi episode ---
         is_multi = (
@@ -736,12 +792,12 @@ def plot_compactness_over_time(
                         linewidth=1.2)
 
     ax.set_xlabel('Timestep')
-    ax.set_ylabel('Team Compactness (rho_tc)')
+    ax.set_ylabel(r'Team Compactness ($\rho_{tc}$)')
     ax.set_title(title)
-    ax.legend(frameon=True, framealpha=0.9, edgecolor='gray')
+    ax.legend(frameon=True, framealpha=0.9, edgecolor='#cccccc')
 
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print('Saved: %s' % output_path)
 
@@ -754,40 +810,50 @@ def plot_ablation_study(
     output_path: str,
     title: str = 'Ablation Study — RCI Contribution by Hierarchy Level',
 ):
-    """Bar chart: RCI value with each hierarchy level disabled.
+    """Horizontal bar chart: metric value with each component disabled.
 
-    Args:
-        data: dict mapping ablation_config -> RCI_cat value
-              e.g. {'Full HMARL': 0.75, 'No High-Level': 0.60, ...}
-        output_path: path to save
-        title: plot title
+    Bars sorted by value (descending) for immediate comparison.
+    Full HMARL shown in primary color; ablated configs in lighter shades.
     """
     _apply_style()
-    fig, ax = plt.subplots(figsize=(8, 5))
 
-    configs = list(data.keys())
-    values = list(data.values())
+    # Sort by value (descending)
+    sorted_items = sorted(data.items(), key=lambda x: x[1], reverse=True)
+    configs = [item[0] for item in sorted_items]
+    values = [item[1] for item in sorted_items]
     n = len(configs)
 
-    # Color gradient
-    colors = plt.cm.Blues(np.linspace(0.9, 0.3, n))
+    # Color: Full HMARL gets primary, others get progressively lighter
+    bar_colors = []
+    for cfg in configs:
+        if 'Full' in cfg or 'HMARL' in cfg.upper():
+            bar_colors.append(COLORS['hmarl'])
+        else:
+            bar_colors.append('#90B4CE')  # Light blue for ablated
 
-    bars = ax.barh(range(n), values, color=colors, edgecolor='white',
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    bars = ax.barh(range(n), values, color=bar_colors, edgecolor='white',
                    linewidth=0.5, height=0.6)
 
     ax.set_yticks(range(n))
     ax.set_yticklabels(configs)
-    ax.set_xlabel('RCI$_{cat}$')
-    ax.set_title(title)
-    ax.set_xlim(0, max(values) * 1.15 if values else 1.0)
+    ax.set_xlabel(r'RCI$_{cat}$')
+    ax.invert_yaxis()  # Highest value on top
+
+    # Reference line for full model
+    full_val = values[0]  # Already sorted descending
+    ax.axvline(x=full_val, color=COLORS['hmarl'], linestyle='--',
+               alpha=0.3, linewidth=1)
 
     # Value labels
     for bar, val in zip(bars, values):
         ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2,
                f'{val:.3f}', va='center', fontsize=9)
 
+    ax.set_xlim(0, max(values) * 1.15 if values else 1.0)
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -824,11 +890,9 @@ def plot_tactic_transitions(
     num_subgoals = 5
     subgoal_names = ['Zonal\nMarking', 'Build-up', 'Wing\nAttack',
                      'Man\nMarking', 'Clearance']
-    colors = ['#2c3e50', '#3498db', '#2ecc71', '#e74c3c', '#f39c12']
+    colors = [COLORS['hmarl'], COLORS['secondary'], COLORS['accent'], '#CC79A7', COLORS['accent']]
 
     # --- Detect single vs multi episode ---
-    # Single: sub_goals_per_agent[0] is a list of ints (one timestep's sub-goals)
-    # Multi:  sub_goals_per_agent[0] is a list of lists (one episode's timesteps)
     first = sub_goals_per_agent[0]
     is_multi = (
         isinstance(first, (list, np.ndarray))
@@ -894,7 +958,7 @@ def plot_tactic_transitions(
     ax.legend(loc='upper right', fontsize=8, frameon=True, framealpha=0.9)
     ax.set_ylim(0, 100)
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print('Saved: %s' % output_path)
 
@@ -921,7 +985,7 @@ def plot_reward_breakdown(
     components = ['game_reward', 'r_high', 'r_mid', 'r_low']
     labels = ['Game Reward ($r_{game}$)', 'FAI ($r_{high}$)',
               'PPR ($r_{mid}$)', 'RCI ($r_{low}$)']
-    colors = ['#2c3e50', '#3498db', '#2ecc71', '#e74c3c']
+    colors = [COLORS['hmarl'], COLORS['secondary'], COLORS['accent'], '#CC79A7']
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -952,12 +1016,12 @@ def plot_reward_breakdown(
     ax.stackplot(x, *all_data, labels=labels, colors=colors, alpha=0.8)
 
     ax.set_xlabel('Episode')
-    ax.set_ylabel('Reward Contribution')
+    ax.set_ylabel('Reward Contribution (cumulative per episode)')
     ax.set_title(title)
     ax.legend(loc='upper left', fontsize=8, frameon=True, framealpha=0.9)
 
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -1002,15 +1066,23 @@ def plot_metric_correlation(
 
     # Display names
     display = {
-        'rci_cat': 'RCI$_{cat}$',
-        'rci_strict': 'RCI$_{strict}$',
+        'rci_cat': r'RCI$_{cat}$',
+        'rci_strict': r'RCI$_{strict}$',
         'fai_mean': 'FAI',
-        'positional_entropy': 'Entropy (H)',
+        'positional_entropy': 'Entropy',
         'compactness_mean': 'Compactness',
         'psr': 'PSR',
         'ppr': 'PPR',
         'wr': 'WR',
         'cumulative_reward': 'Cum. Reward',
+        'goal_difference': 'Goal Diff.',
+        'goals_for': 'Goals For',
+        'goals_against': 'Goals Against',
+        'defence_midfield_gap': 'Def-Mid Gap',
+        'midfield_attack_gap': 'Mid-Att Gap',
+        'overall_spread': 'Spread',
+        'convex_hull_mean': 'Convex Hull',
+        'bpr_mean': 'BPR',
     }
     labels = [display.get(m, m) for m in metrics]
 
@@ -1019,19 +1091,23 @@ def plot_metric_correlation(
     ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
     ax.set_yticklabels(labels, fontsize=9)
 
-    # Annotate values
+    # Annotate with r values
     for i in range(n):
         for j in range(n):
             val = matrix[i, j]
             color = 'white' if abs(val) > 0.6 else 'black'
-            ax.text(j, i, f'{val:.2f}', ha='center', va='center',
-                   fontsize=8, color=color)
+            if i == j:
+                ax.text(j, i, '1.00', ha='center', va='center',
+                       fontsize=8, color=color)
+            else:
+                ax.text(j, i, f'{val:.2f}', ha='center', va='center',
+                       fontsize=8, color=color)
 
-    ax.set_title(title)
+    # No figure title — thesis caption serves this role
     fig.colorbar(im, ax=ax, shrink=0.8, label='Pearson r')
 
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -1156,11 +1232,19 @@ def generate_all_plots(
 
     # --- Plot 12: Correlation heatmap ---
     if model_comparisons:
-        # Aggregate per-episode data from all models
+        # Core metrics for correlation — exclude auxiliary stats
+        CORE_CORR_METRICS = {
+            'wr', 'goal_difference', 'goals_for', 'goals_against',
+            'cumulative_reward', 'psr', 'ppr', 'positional_entropy',
+            'compactness_mean', 'fai_mean',
+            'rci_strict', 'rci_cat',
+            'defence_midfield_gap', 'midfield_attack_gap', 'overall_spread',
+            'convex_hull_mean', 'bpr_mean',
+        }
         all_metric_data = {}
         for model, metrics_dict in model_comparisons.items():
             for k, v in metrics_dict.items():
-                if isinstance(v, (int, float)):
+                if isinstance(v, (int, float)) and k in CORE_CORR_METRICS:
                     if k not in all_metric_data:
                         all_metric_data[k] = []
                     all_metric_data[k].append(v)
@@ -1227,7 +1311,7 @@ def plot_pass_network(
                 '', xy=(xj, yj), xytext=(xi, yi),
                 arrowprops=dict(
                     arrowstyle='->', lw=width,
-                    color='#555555', alpha=0.6,
+                    color='#666666', alpha=0.5,
                     connectionstyle='arc3,rad=0.1',
                 ),
             )
@@ -1250,7 +1334,7 @@ def plot_pass_network(
     ax.set_title(title)
     ax.axis('off')
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -1279,7 +1363,7 @@ def plot_iad_per_line(
         data.get('midfield_attack_gap', 0),
         data.get('overall_spread', 0),
     ]
-    colors = ['#3498db', '#f39c12', '#e74c3c']
+    colors = [COLORS['hmarl'], COLORS['accent'], COLORS['secondary']]
 
     bars = ax.bar(labels, values, color=colors, edgecolor='#333333', width=0.5)
     for bar, val in zip(bars, values):
@@ -1289,7 +1373,7 @@ def plot_iad_per_line(
     ax.set_ylabel('Distance (pitch units)')
     ax.set_title(title)
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -1332,18 +1416,19 @@ def plot_convex_hull(
     if not areas:
         ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center')
     else:
-        ax.plot(range(len(areas)), areas, color='#3498db', linewidth=0.8, alpha=0.8)
+        ax.plot(range(len(areas)), areas, color=COLORS['secondary'],
+                linewidth=0.8, alpha=0.8)
         if len(areas) >= 20:
             smoothed = np.convolve(areas, np.ones(20) / 20, mode='valid')
             ax.plot(range(19, len(areas)), smoothed,
-                    color='#e74c3c', linewidth=2, label='Rolling mean (20)')
+                    color=COLORS['accent'], linewidth=2, label='Rolling mean (20)')
             ax.legend()
 
     ax.set_xlabel('Timestep')
     ax.set_ylabel('Convex Hull Area')
     ax.set_title(title)
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -1369,7 +1454,7 @@ def plot_action_transitions(
     n = min(trans_probs.shape[0], max_actions)
     fig, ax = plt.subplots(figsize=(8, 7))
 
-    im = ax.imshow(trans_probs[:n, :n], cmap='YlOrRd', aspect='equal')
+    im = ax.imshow(trans_probs[:n, :n], cmap='viridis', aspect='equal')
     ax.set_xlabel('Next Action')
     ax.set_ylabel('Current Action')
     ax.set_title(title)
@@ -1379,7 +1464,7 @@ def plot_action_transitions(
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label('P(next | current)')
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')
 
@@ -1409,15 +1494,15 @@ def plot_bpr_distribution(
             deltas.append((ball_x_next - ball_x) * 60.0)
 
     if deltas:
-        ax.hist(deltas, bins=50, color='#3498db', edgecolor='#333333', alpha=0.8)
+        ax.hist(deltas, bins=50, color=COLORS['secondary'], edgecolor='white', alpha=0.8)
         mean_d = np.mean(deltas)
-        ax.axvline(mean_d, color='#e74c3c', linestyle='--', linewidth=1.5,
+        ax.axvline(mean_d, color=COLORS['accent'], linestyle='--', linewidth=1.5,
                     label=f'Mean: {mean_d:.2f}')
         ax.legend()
     ax.set_xlabel('Ball x-displacement (pitch units)')
     ax.set_ylabel('Frequency')
     ax.set_title(title)
     fig.tight_layout()
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     print(f'Saved: {output_path}')

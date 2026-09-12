@@ -25,7 +25,7 @@ import torch
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state, ACTION_SPACE_SIZE
 from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
 from hmarl.expert import ExpertPolicyAllAgents
-from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
 from hmarl.metrics import compute_win_rate, compute_goal_difference, formation_adherence_index, team_compactness
 from hmarl.rci import compute_rci
 from hmarl.utils import (
@@ -72,6 +72,7 @@ def evaluate_policy(
         game_state = extract_game_state(obs_raw)
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
         ep_reward = 0.0
         ep_actual = []
         ep_ideal = []
@@ -107,7 +108,7 @@ def evaluate_policy(
             team_reward = float(np.sum(reward))
             new_gs = extract_game_state(obs_raw)
             pass_tracker.update(new_gs, prev_gs)
-            total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker)
+            total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker, ball_progression_tracker=ball_prog_tracker)
             ep_reward += total_r
             ep_actual.append(joint_actions)
             ep_ideal.append(ideal)

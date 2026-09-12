@@ -14,7 +14,7 @@ hmarl-grf/
 │   ├── utils.py                  # Shared utilities (seed, obs extraction, checkpointing, progress)
 │   ├── policy.py                 # Hierarchical policy (High/Mid/Low-level)
 │   ├── expert.py                 # Rule-based expert policy (RCI oracle)
-│   ├── reward.py                 # Reward shaping (FAI, PPR, RCI components)
+│   ├── reward.py                 # Reward shaping (FAI, PPR, RCI, Ball Progression)
 │   ├── rci.py                    # Role Coherence Index metric
 │   ├── metrics.py                # Evaluation metrics suite
 │   ├── ippo.py                   # Independent PPO baseline
@@ -26,13 +26,14 @@ hmarl-grf/
 │   ├── dry_run.py                # Dry run / smoke test (3-layer validation)
 │   ├── sweep.py                  # Optuna hyperparameter sweep
 │   ├── stat_test.py              # Multi-seed statistical significance testing
+│   ├── validate_rci.py              # RCI validity evaluation (construct, discrimination, consistency)
 │   └── ablation.py               # Ablation study (component contributions)
 ├── evaluation/
 │   ├── baselines/                # Stable Baselines3 baselines
 │   │   ├── 11v11_a2c.py
 │   │   ├── 11v11_ppo.py
 │   │   └── 11v11_random_action.py
-│   ├── visualizations.py         # Plotting utilities (12 plot types)
+│   ├── visualizations.py         # Plotting utilities (16 plot types, colorblind-safe)
 │   ├── coordination_metrics.py   # Coordination metric computation
 │   ├── plot_results.py           # Plot generation CLI (--demo mode)
 │   └── average_position.py       # Average position analysis
@@ -57,7 +58,7 @@ flowchart LR
         A1["train.py"] --> A2["GRF 11v11<br/>Environment"]
         A1 --> A3["Hierarchical Policy<br/>High → Mid → Low"]
         A1 --> A4["Expert Policy<br/>(rule-based)"]
-        A4 --> A5["Reward Shaping<br/>r = r_game + α·FAI + β·PPR + γ·RCI"]
+        A4 --> A5["Reward Shaping<br/>R = r_game + α_H·FAI + α_M·PPR + α_L/N·ΣRCI_i + α_P·prog"]
         A5 --> A6["PPO Update"]
         A6 --> A7["Checkpoint<br/>hmarl_model.pt"]
         A6 --> A8["Training Logs<br/>TensorBoard + JSON"]
@@ -105,7 +106,7 @@ flowchart LR
 
     subgraph ABLAT["Ablation Study"]
         direction TB
-        F1["ablation.py"] --> F2["no_fai / no_ppr /<br/>no_rci / no_shaping"]
+        F1["ablation.py"] --> F2["no_fai / no_ppr /<br/>no_rci / no_prog /<br/>no_shaping"]
         F2 --> F3["Compare Δ performance<br/>+ Δ coordination metrics"]
         F3 --> F4["ablation_results.json"]
     end
@@ -145,7 +146,7 @@ Three-level hierarchical architecture:
 - **Mid-Level** (π^M): Rule-based — (role, macro strategy, local state) → sub-goal (Zonal Marking / Build-up / Wing Attack / Man Marking / Clearance)
 - **Low-Level** (π^L): PPO-trained neural network — (observation, sub-goal embedding) → action
 
-Combined reward: `R_t = r_game + α_H·FAI + α_M·PPR + (α_L/N)·Σ RCI_i`
+Combined reward: `R_t = r_game + α_H·FAI + α_M·PPR + (α_L/N)·Σ RCI_i + α_P·prog(t)`
 
 ### Baselines
 
@@ -178,12 +179,12 @@ Combined reward: `R_t = r_game + α_H·FAI + α_M·PPR + (α_L/N)·Σ RCI_i`
 | Optimizer | Adam (ε=1e-5) | Adam | Adam | Adam |
 | Grad clip | 0.5 | 0.5 | 0.5 | 0.5 |
 | Env representation | raw | raw | raw | raw |
-| **Reward signal** | **r_game + FAI + PPR + RCI** | r_game only | r_game only | r_game only |
+| **Reward signal** | **r_game + FAI + PPR + RCI + prog** | r_game only | r_game only | r_game only |
 | Seed support | ✅ | ✅ | ✅ | ✅ |
 | CLI resume | ✅ | ✅ | ✅ | ✅ |
 | Mid-train eval | ✅ | ✅ | ✅ | ✅ |
 
-**Reward shaping difference (intentional):** HMARL uses hierarchical reward shaping (FAI, PPR, RCI) while baselines use game reward only. This is a deliberate design choice: baselines represent standard flat RL without domain-specific reward engineering. HMARL's improvement over baselines is attributed to the combination of hierarchical architecture AND reward shaping. The ablation study (`scripts/ablation.py`) isolates each component's contribution.
+**Reward shaping difference (intentional):** HMARL uses hierarchical reward shaping (FAI, PPR, RCI, Ball Progression) while baselines use game reward only. This is a deliberate design choice: baselines represent standard flat RL without domain-specific reward engineering. HMARL's improvement over baselines is attributed to the combination of hierarchical architecture AND reward shaping. The ablation study (`scripts/ablation.py`) isolates each component's contribution.
 
 ## Environment
 
@@ -286,7 +287,7 @@ python scripts/train.py --dump-freq 0
 
 **Mid-training evaluation:** Automatically runs 10-episode evaluation every 500 episodes, logging win rate, avg reward, and goal difference to TensorBoard.
 
-**Training log:** Per-episode metrics saved to `dumps/training_log.json` (rewards, RCI, FAI, PPR, compactness).
+**Training log:** Per-episode metrics saved to `dumps/training_log.json` (rewards, RCI, FAI, PPR, compactness, ball progression, action distribution).
 
 ## TensorBoard Monitoring
 
@@ -305,6 +306,11 @@ TensorBoard logs are written to `dumps/hmarl_runs/` by `train.py`.
 | `eval/win_rate` | Every 500 episodes | Win rate during mid-training eval |
 | `eval/avg_reward` | Every 500 episodes | Average reward during mid-training eval |
 | `eval/goal_diff` | Every 500 episodes | Goal difference during mid-training eval |
+| `metrics/rci_cat` | Every 50 episodes | Rolling RCI_cat average |
+| `metrics/rci_strict` | Every 50 episodes | Rolling RCI_strict average |
+| `metrics/fai` | Every 50 episodes | Rolling FAI average |
+| `metrics/ppr` | Every 50 episodes | Rolling PPR average |
+| `metrics/compactness` | Every 50 episodes | Rolling compactness average |
 
 **Access from host:**
 ```bash
@@ -364,10 +370,12 @@ python scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --render
 - **Performance**: Win Rate, Goal Difference, Cumulative Reward
 - **Coordination**: PSR, PPR, Positional Entropy, Team Compactness, FAI
 - **Role Coherence**: RCI_strict (exact match), RCI_cat (category match)
+- **Action Analysis**: Action distribution, entropy, dominant action % (mode collapse detection)
 
 **Output files:**
-- `evaluation_results/hmarl_results.json` — aggregate metrics
+- `evaluation_results/hmarl_results.json` — aggregate metrics + action distribution
 - `evaluation_results/hmarl_episodes.json` — per-episode breakdown
+- `evaluation_results/reward_components.json` — per-episode reward breakdown (game, FAI, PPR, RCI, progression)
 - `evaluation_results/plots/` — role heatmap, formation snapshots, action distribution, strategy timeline, compactness plot
 
 ## Dry Run (Smoke Test)
@@ -378,6 +386,7 @@ Three-layer validation to catch issues before full training runs.
 |-------|---------------|---------------|
 | 1 | AST syntax check on all `.py` files | No |
 | 2 | Import all modules + unit tests (policy, reward, metrics, buffer) | Yes |
+| 2c | Script unit tests (eval, validate_rci, stat_test, ablation, sweep) | Yes |
 | 3 | Full GRF integration: 1 episode, 50 steps, PPO backward pass | Yes |
 
 ```bash
@@ -392,21 +401,22 @@ python scripts/dry_run.py --ast-only
 ```
 
 **What it verifies:**
-- All 33 `.py` files parse without syntax errors
+- All `.py` files parse without syntax errors
 - All `hmarl.*` modules import successfully
 - Policy forward/backward pass with correct shapes
 - Observation vector extraction (115-dim)
 - High/Mid-level policy logic (strategy + sub-goal)
 - Expert policy ideal actions per role
-- Reward computation (FAI + PPR + RCI)
+- Reward computation (FAI + PPR + RCI + Ball Progression)
 - Rollout buffer (add, GAE, mini-batch)
 - Action category mapping
 - Mock training loop: 50 steps, full PPO update
+- Script function tests: eval obs extraction, validate_rci correlation/t-test/CV, stat_test Mann-Whitney U, ablation reward factory, sweep optuna availability
 
 **Example output:**
 ```
 === Layer 1: AST Syntax Check ===
-  All 33 .py files parse OK
+  All .py files parse OK
 
 === Layer 2: Component Unit Tests ===
   PASS  import all modules
@@ -436,19 +446,31 @@ python scripts/dry_run.py --ast-only
   PASS  PPO backward update (mock pipeline)
   Mock pipeline: 50 steps in 1.23s (41 steps/s)
 
+=== Layer 2c: Script Unit Tests ===
+  PASS  eval._extract_dict_from_simple
+  PASS  eval.get_obs_vector
+  PASS  validate_rci.construct_validity
+  PASS  validate_rci.discrimination_validity
+  PASS  validate_rci.internal_consistency
+  PASS  validate_rci.run_full_validation
+  PASS  stat_test.run_statistical_test
+  PASS  sweep imports
+  PASS  ablation.make_custom_reward
+  PASS  ablation.ABLATION_CONFIGS
+
 === Layer 3: GRF Integration (1 episode, 50 steps) ===
   PASS  env.reset + extract_game_state
   PASS  env.step full loop (50 steps)
   PASS  GRF PPO backward (10 steps)
 
 ============================================================
-  ALL 20 CHECKS PASSED
+  ALL 30 CHECKS PASSED
 ============================================================
 ```
 
 ## Plot Generation
 
-Generate all 12 thesis plots from saved evaluation results, or with synthetic data for visual verification.
+Generate all 16 thesis plots from saved evaluation results, or with synthetic data for visual verification.
 
 ```bash
 # Demo mode: generate all plots with synthetic data (no training needed)
@@ -462,24 +484,33 @@ docker exec gfootball-dev bash -c "cd /app && python3 evaluation/plot_results.py
 docker cp gfootball-dev:/app/evaluation_results/plots/ ./plots_output/
 ```
 
-**12 plot types:**
+**16 plot types:**
 
 | # | Plot | File | Description |
 |---|------|------|-------------|
-| 1 | Learning Curve | `01_learning_curve.png` | Cumulative reward vs episode (rolling mean + std) |
-| 2 | RCI Evolution | `02_rci_evolution.png` | RCI_cat and RCI_strict over training |
-| 3 | Comparative Bars | `03_comparative_metrics.png` | Grouped bar chart for all 10 metrics |
-| 4 | Role Heatmap | `04_role_heatmap.png` | 2D position frequency per role on pitch |
-| 5 | Formation Snapshot | `05_formation_*.png` | Agent positions at specific timestep |
+| 1 | Learning Curve | `01_learning_curve.png` | Cumulative reward vs episode (rolling mean ± std band) |
+| 2 | RCI Evolution | `02_rci_evolution.png` | RCI_cat (a) and RCI_strict (b) over training — two-panel with subplot labels |
+| 3 | Comparative Bars | `03_comparative_metrics.png` | Two-panel: (a) Performance, (b) Coordination (normalized to [0,1]) |
+| 4 | Role Heatmap | `04_role_heatmap.png` | 2D position frequency per role on pitch (hot colormap) |
+| 5 | Formation Snapshot | `05_formation_*.png` | Agent positions at specific timestep (start/mid/late) |
 | 6 | Action Distribution | `06_action_distribution.png` | Stacked bar: action category per role |
-| 7 | Strategy Timeline | `07_strategy_timeline.png` | Macro strategy activation over match |
-| 8 | Compactness | `08_compactness.png` | Team compactness ρ_tc over time |
-| 9 | Ablation Study | `09_ablation.png` | RCI contribution per hierarchy level |
-| 10 | Tactic Transitions | `10_tactic_transitions.png` | Sub-goal frequency stacked area |
+| 7 | Strategy Timeline | `07_strategy_timeline.png` | Macro strategy activation over match (single or multi-episode) |
+| 8 | Compactness | `08_compactness.png` | Team compactness ρ_tc over time (multi-episode: mean ± std) |
+| 9 | Ablation Study | `09_ablation.png` | Horizontal bars sorted by value, Full HMARL highlighted, reference line |
+| 10 | Tactic Transitions | `10_tactic_transitions.png` | Sub-goal frequency stacked area (single or multi-episode) |
 | 11 | Reward Breakdown | `11_reward_breakdown.png` | Reward component contribution over training |
 | 12 | Correlation Heatmap | `12_correlation_heatmap.png` | Pearson r between coordination metrics |
+| 13 | Pass Network | `13_pass_network.png` | Weighted directed graph of pass connections between players |
+| 14 | Inter-Agent Distance | `14_iad_per_line.png` | Bar chart: gaps between defence/midfield/attack lines |
+| 15 | Convex Hull | `15_convex_hull_ts.png` | Convex hull area over match duration |
+| 16 | Action Transitions | `16_action_transitions.png` | Action-to-action transition probability heatmap (viridis) |
 
-**Plot style:** Academic (serif font, 300 DPI, grayscale-compatible, no seaborn dependency).
+**Plot design:**
+- **Colorblind-safe palette**: Wong (2011) — all 5 methods distinguishable by color, linestyle, AND marker (triple encoding)
+- **Stable mapping**: HMARL = blue, SHPPO = vermillion, MAPPO = pink, IPPO = green, Random = gray — consistent across all figures
+- **Subplot labels**: Multi-panel figures use (a), (b) labels for thesis cross-referencing
+- **No figure titles**: Thesis convention — `\caption{}` serves as title
+- **300 DPI**, serif font, Computer Modern math rendering, no seaborn dependency
 
 ## Hyperparameter Sweep
 
@@ -572,7 +603,7 @@ python scripts/validate_rci.py --algorithms hmarl ippo shppo random
 
 **Output:** `evaluation_results/rci_validity.json`
 
-**Error handling:** Full tracebacks on failure (not just error messages). Imports consolidated to `hmarl.utils` (no more cross-script circular imports).
+**Error handling:** Full tracebacks on failure (not just error messages). Imports consolidated to `hmarl.utils` (no more cross-script circular imports). Format string safety for missing metrics. Handles skipped tests (e.g., insufficient seeds) without KeyError.
 
 **Dependencies:** `scipy` (for t-test and Pearson correlation). Skips gracefully if not installed.
 
@@ -594,12 +625,13 @@ Tests contribution of each component by systematically removing them:
 | `no_fai` | Without FAI reward | α_H = 0, no formation adherence signal |
 | `no_ppr` | Without PPR reward | α_M = 0, no progressive pass signal |
 | `no_rci` | Without RCI reward | α_L = 0, no role coherence signal |
+| `no_prog` | Without ball progression | α_P = 0, no dense forward-progress signal |
 | `no_reward_shaping` | Game reward only | All α = 0, pure game reward |
 | `flat_policy` | Flat policy | Sub-goal embedding zeroed out, no hierarchical conditioning |
 | `random_expert` | Random expert | Ideal actions random instead of rule-based |
 
 ```bash
-# Full ablation (all 7 configs)
+# Full ablation (all 8 configs)
 python scripts/ablation.py --timesteps 300000 --eval-episodes 50
 
 # Quick mode (100k steps, 20 eval episodes)
@@ -614,7 +646,7 @@ python scripts/ablation.py --seed 123 --timesteps 500000
 
 **Output:** `evaluation_results/ablation_results.json`
 
-**Progress tracking:** Live progress bar with ETA for the 7-config loop. Error tracebacks on failure.
+**Progress tracking:** Live progress bar with ETA for the 8-config loop. Error tracebacks on failure.
 
 **Temp cleanup:** `ablation_temp/` directory cleaned up after completion.
 
@@ -626,6 +658,7 @@ python scripts/ablation.py --seed 123 --timesteps 500000
   no_fai                       38.0%        10.21          2  (-7.0%)
   no_ppr                       40.0%        11.05          3  (-5.0%)
   no_rci                       35.0%         9.87          0  (-10.0%)
+  no_prog                      32.0%         8.92         -1  (-13.0%)
   no_reward_shaping            30.0%         8.45         -2  (-15.0%)
   flat_policy                  25.0%         7.12         -5  (-20.0%)
   random_expert                42.0%        11.50          4  (-3.0%)
@@ -652,11 +685,14 @@ python scripts/ablation.py --seed 123 --timesteps 500000
 
 ## Reward Shaping Coefficients
 
-| Coefficient | Component | Value |
-|-------------|-----------|-------|
-| α_H | Formation Adherence Index (FAI) | 0.01 |
-| α_M | Progressive Pass Ratio (PPR) | 0.01 |
-| α_L | Role Coherence Index (RCI) | 0.01 |
+| Coefficient | Component | Value | Description |
+|-------------|-----------|-------|-------------|
+| α_H | Formation Adherence Index (FAI) | 0.1 | High-level formation adherence signal |
+| α_M | Progressive Pass Ratio (PPR) | 0.1 | Mid-level progressive passing signal |
+| α_L | Role Coherence Index (RCI) | 0.05 | Low-level role coherence signal |
+| α_P | Ball Progression | 0.2 | Dense forward-progress reward |
+
+**Rationale:** Coefficients are scaled so that shaping terms contribute ~0.1–0.3 per step (meaningful gradient signal), while the game reward contributes ~-5 to -10 per step (sparse, only on goals). The ball progression term (α_P = 0.2) provides the strongest dense signal to prevent the agent from collapsing into inaction when no goals are scored.
 
 ## CLI Reference
 
@@ -738,7 +774,7 @@ This metadata is displayed by `eval.py` when loading a checkpoint and stored in 
 --timesteps INT     Training steps per config (default: 300,000)
 --eval-episodes INT Eval episodes per config (default: 50)
 --seed INT          Random seed (default: 42)
---configs LIST      Specific configs to run (default: all 7)
+--configs LIST      Specific configs to run (default: all 8)
 --output PATH       Output JSON path
 --quick             Quick mode: 100k steps, 20 eval episodes
 ```

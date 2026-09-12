@@ -40,7 +40,6 @@ def load_json(path: str) -> dict:
             return json.load(f)
     return {}
 
-
 def generate_plots_from_results(
     results_dir: str,
     output_dir: str,
@@ -205,10 +204,19 @@ def generate_plots_from_results(
 
     # --- 12. Correlation Heatmap ---
     if len(models_data) >= 2:
+        # Core metrics for correlation — exclude auxiliary stats (std, min, max)
+        CORE_CORR_METRICS = {
+            'wr', 'goal_difference', 'goals_for', 'goals_against',
+            'cumulative_reward', 'psr', 'ppr', 'positional_entropy',
+            'compactness_mean', 'fai_mean',
+            'rci_strict', 'rci_cat',
+            'defence_midfield_gap', 'midfield_attack_gap', 'overall_spread',
+            'convex_hull_mean', 'bpr_mean',
+        }
         all_metric_data = {}
         for model_name, m_data in models_data.items():
             for k, v in m_data.items():
-                if isinstance(v, (int, float)) and k not in ('num_episodes',):
+                if isinstance(v, (int, float)) and k in CORE_CORR_METRICS:
                     if k not in all_metric_data:
                         all_metric_data[k] = []
                     all_metric_data[k].append(v)

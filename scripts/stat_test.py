@@ -24,7 +24,7 @@ import torch
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
 from hmarl.expert import ExpertPolicyAllAgents
-from hmarl.reward import PassTracker, RCITracker, compute_hierarchical_reward
+from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
 from hmarl.metrics import compute_win_rate, compute_goal_difference, compute_all_metrics, print_metrics
 from hmarl.rci import compute_rci
 from hmarl.utils import (
@@ -86,7 +86,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
         hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
     ).to(DEVICE)
     subgoal_emb = SubGoalEmbedding().to(DEVICE)
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     policy.load_state_dict(ckpt['policy_state'])
     subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
     policy.eval()
@@ -110,6 +110,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
         game_state = extract_game_state(obs_raw)
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
         ep_reward = 0.0
         ep_actual = []
         ep_ideal = []
@@ -142,7 +143,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
             team_reward = float(np.sum(reward))
             new_gs = extract_game_state(obs_raw)
             pass_tracker.update(new_gs, prev_gs)
-            total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker)
+            total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker, ball_progression_tracker=ball_prog_tracker)
             ep_reward += total_r
             ep_actual.append(joint_actions)
             ep_ideal.append(ideal)
@@ -151,7 +152,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
             game_state = new_gs
             step += 1
 
-        score = info.get('score', [0, 0])
+        score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)
@@ -199,7 +200,7 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
         env.close()
         return {}
 
-    ckpt = torch.load(model_path, map_location='cpu')
+    ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
     if algorithm == "mappo":
         model.load_state_dict(ckpt['actor_state'])
     else:
@@ -223,6 +224,7 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
         game_state = extract_game_state(obs_raw)
         pass_tracker = PassTracker()
         rci_tracker = RCITracker(NUM_AGENTS)
+        ball_prog_tracker = BallProgressionTracker()
         done = False
         ep_reward = 0.0
         ep_actual = []
@@ -253,7 +255,7 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
             team_reward = float(np.sum(reward))
             new_gs = extract_game_state(obs_raw)
             pass_tracker.update(new_gs, prev_gs)
-            total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker)
+            total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker, ball_progression_tracker=ball_prog_tracker)
             ep_reward += total_r
             ep_actual.append(joint_actions)
             ep_ideal.append(ideal)
@@ -262,7 +264,8 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
             game_state = new_gs
             step += 1
 
-        score = info.get('score', [0, 0])
+        game_state = extract_game_state(obs_raw)
+        score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         all_match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)
@@ -313,7 +316,8 @@ def evaluate_random(num_episodes: int, seed: int) -> Dict:
             ep_reward += float(np.sum(reward))
             step += 1
 
-        score = info.get('score', [0, 0])
+        game_state = extract_game_state(obs_raw)
+        score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)
