@@ -617,13 +617,17 @@ class HMARLTrainer:
                 ppr_avg = np.mean(self._train_log['episode_ppr'][-window:])
                 comp_avg = np.mean(self._train_log['episode_compactness'][-window:])
 
+                pct = 100.0 * self.global_step / self.total_timesteps
+                remaining = (self.total_timesteps - self.global_step) / max(steps_per_sec, 1)
+                hrs, rem = divmod(int(remaining), 3600)
+                mins, secs = divmod(rem, 60)
                 print(
-                    f"Ep {self.episode_count:6d} | "
+                    f"[{pct:5.1f}%] Ep {self.episode_count:6d} | "
                     f"Step {self.global_step:8d}/{self.total_timesteps:,} | "
-                    f"Avg Reward (100ep): {avg_reward:8.2f} | "
+                    f"AvgR(100): {avg_reward:8.2f} | "
                     f"RCI: {rci_cat_avg:.3f} | FAI: {fai_avg:.3f} | "
-                    f"PPR: {ppr_avg:.3f} | Compact: {comp_avg:.3f} | "
-                    f"Steps/s: {steps_per_sec:.1f}"
+                    f"PPR: {ppr_avg:.3f} | Cmp: {comp_avg:.3f} | "
+                    f"{steps_per_sec:.1f} steps/s | ETA {hrs:02d}:{mins:02d}:{secs:02d}"
                 )
 
                 # Reward curve

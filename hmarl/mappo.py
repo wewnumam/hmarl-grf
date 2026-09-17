@@ -42,6 +42,7 @@ VF_COEF = 0.5
 MINIBATCH_SIZE = 64
 NUM_EPOCHS = 4
 TOTAL_TIMESTEPS = 3_000_000
+LOG_FREQ = 50              # Print progress every N episodes
 EPISODE_MAX_STEPS = 3000
 LEARNING_RATE = 3e-4
 
@@ -277,14 +278,22 @@ class MAPPOTrainer:
             self._update()
 
             self.episode_count += 1
-            if self.episode_count % 500 == 0:
+            if self.episode_count % LOG_FREQ == 0:
                 elapsed = time.time() - start
+                steps_per_sec = self.global_step / max(elapsed, 1)
+                pct = 100.0 * self.global_step / self.total_timesteps
+                remaining = (self.total_timesteps - self.global_step) / max(steps_per_sec, 1)
+                hrs, rem = divmod(int(remaining), 3600)
+                mins, secs = divmod(rem, 60)
                 print(
-                    f"Ep {self.episode_count:6d} | Step {self.global_step:8d}/{self.total_timesteps:,} | "
-                    f"Reward: {episode_reward:7.2f} | "
-                    f"Steps/s: {self.global_step/max(elapsed,1):.1f}"
+                    f"[{pct:5.1f}%] Ep {self.episode_count:6d} | "
+                    f"Step {self.global_step:8d}/{self.total_timesteps:,} | "
+                    f"Rwd {episode_reward:7.2f} | "
+                    f"{steps_per_sec:.1f} steps/s | ETA {hrs:02d}:{mins:02d}:{secs:02d}"
                 )
-                # Mid-training evaluation + save
+
+            # Mid-training evaluation + save every 500 episodes
+            if self.episode_count % 500 == 0:
                 self._save()
                 eval_stats = self._quick_eval(num_episodes=10)
                 print(

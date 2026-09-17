@@ -284,8 +284,8 @@ def quick_eval(
                 obs_vec = extract_obs_vector(game_state, i)
                 obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
                 with torch.no_grad():
-                    logits, _ = model(obs_t)
-                    joint_actions.append(logits.argmax(dim=-1).item())
+                    action = model.get_action_and_value(obs_t)[0]
+                    joint_actions.append(action.item())
 
             step_result = eval_env.step(joint_actions)
             if len(step_result) == 5:

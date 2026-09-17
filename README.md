@@ -106,9 +106,14 @@ flowchart LR
 
     subgraph ABLAT["Ablation Study"]
         direction TB
-        F1["ablation.py"] --> F2["no_fai / no_ppr /<br/>no_rci / no_prog /<br/>no_shaping"]
+        F1["ablation.py"] --> F2["no_fai / no_ppr /<br/>no_rci / no_shaping /<br/>flat_policy / random_expert"]
         F2 --> F3["Compare Δ performance<br/>+ Δ coordination metrics"]
         F3 --> F4["ablation_results.json"]
+    end
+
+    subgraph SWEEP["Sweep (Optional)"]
+        direction TB
+        G1["sweep.py<br/>(optuna)"] --> G2["Best hyperparams<br/>best_params.json"]
     end
 
     %% === CROSS-CONNECTIONS ===
@@ -120,6 +125,53 @@ flowchart LR
     B6 -.-> C1
     E5 -.-> C1
 ```
+
+### Research Execution Priority
+
+Scripts categorized by whether they're required for thesis results. **Run Tier 1 first; Tier 2 depends on Tier 1 checkpoints.**
+
+| Tier | Script | Purpose | Research Problem | Skip? |
+|------|--------|---------|-----------------|-------|
+| **0** | `dry_run.py --full` | Smoke test: syntax, imports, GRF env, PPO backward | — | 5 min, do once before any training |
+| **1** | `train.py` | Train HMARL (3M timesteps → checkpoint) | Foundation for all eval | No — produces `hmarl_model.pt` |
+| **1** | `hmarl.ippo` / `hmarl.shppo` / `hmarl.mappo` | Train flat baselines | Need trained baselines for comparison | No — produces `*_model.pt` |
+| **2** | `eval.py` | Full metrics + 16 plot types | All coordination + performance results | No |
+| **2** | `ablation.py` | Component ablation (7 configs) | Rumusan 1: proving each component matters | No — `--quick` for first pass |
+| **2** | `stat_test.py` | Multi-seed Mann-Whitney U | Statistical rigor for comparative claims | No — `--quick` for first pass |
+| **2** | `validate_rci.py` | RCI construct + discrimination + consistency | Rumusan 2: RCI validity | No — needs `stat_test` results or `--seeds` |
+| **3** | `sweep.py` | Optuna hyperparameter search | Optional optimization | **Yes** — hyperparams set via grid search already |
+| **—** | `plot_results.py` | Regenerate plots from saved JSONs | Useful if `eval.py` plots need re-rendering | Optional, not research output |
+
+**Minimum viable path for thesis results:**
+
+```bash
+# 1. Verify environment
+docker compose up -d && docker exec -it gfootball-dev bash
+python scripts/dry_run.py --full
+
+# 2. Train (HMARL + baselines) — several days on GTX 1650
+python scripts/train.py --timesteps 3000000
+python -m hmarl.ippo --timesteps 3000000 --seed 42
+python -m hmarl.shppo --timesteps 3000000 --seed 42
+python -m hmarl.mappo --timesteps 3000000 --seed 42
+
+# 3. Full evaluation (metrics + plots)
+python scripts/eval.py --checkpoint checkpoints/hmarl_model.pt
+
+# 4. Ablation (quick first, then full)
+python scripts/ablation.py --quick
+python scripts/ablation.py --timesteps 300000 --eval-episodes 50
+
+# 5. Statistical testing (quick first, then full)
+python scripts/stat_test.py --quick
+python scripts/stat_test.py --seeds 5 --timesteps 3000000 --eval-episodes 100
+
+# 6. RCI validity
+python scripts/validate_rci.py --quick
+python scripts/validate_rci.py --seeds 3 --timesteps 3000000 --eval-episodes 100
+```
+
+**Estimated compute time (GTX 1650, WSL):** 3–5 days per 3M-step training run. Ablation (7 configs × 300k) ≈ 1–2 days. Stat test (5 seeds × 4 algos × 3M) ≈ 2–3 weeks if sequential; overlap training to reduce wall time.
 
 ### Script → Module Dependency Matrix
 
@@ -625,13 +677,12 @@ Tests contribution of each component by systematically removing them:
 | `no_fai` | Without FAI reward | α_H = 0, no formation adherence signal |
 | `no_ppr` | Without PPR reward | α_M = 0, no progressive pass signal |
 | `no_rci` | Without RCI reward | α_L = 0, no role coherence signal |
-| `no_prog` | Without ball progression | α_P = 0, no dense forward-progress signal |
 | `no_reward_shaping` | Game reward only | All α = 0, pure game reward |
 | `flat_policy` | Flat policy | Sub-goal embedding zeroed out, no hierarchical conditioning |
 | `random_expert` | Random expert | Ideal actions random instead of rule-based |
 
 ```bash
-# Full ablation (all 8 configs)
+# Full ablation (all 7 configs)
 python scripts/ablation.py --timesteps 300000 --eval-episodes 50
 
 # Quick mode (100k steps, 20 eval episodes)
@@ -646,7 +697,7 @@ python scripts/ablation.py --seed 123 --timesteps 500000
 
 **Output:** `evaluation_results/ablation_results.json`
 
-**Progress tracking:** Live progress bar with ETA for the 8-config loop. Error tracebacks on failure.
+**Progress tracking:** Live progress bar with ETA for the 7-config loop. Error tracebacks on failure.
 
 **Temp cleanup:** `ablation_temp/` directory cleaned up after completion.
 
@@ -658,7 +709,6 @@ python scripts/ablation.py --seed 123 --timesteps 500000
   no_fai                       38.0%        10.21          2  (-7.0%)
   no_ppr                       40.0%        11.05          3  (-5.0%)
   no_rci                       35.0%         9.87          0  (-10.0%)
-  no_prog                      32.0%         8.92         -1  (-13.0%)
   no_reward_shaping            30.0%         8.45         -2  (-15.0%)
   flat_policy                  25.0%         7.12         -5  (-20.0%)
   random_expert                42.0%        11.50          4  (-3.0%)

@@ -272,8 +272,13 @@ def train_hmarl_config(
         episode_count += 1
         if episode_count % 200 == 0:
             elapsed = time.time() - start_time
-            print(f"    Ep {episode_count:5d} | Step {global_step:7d}/{timesteps:,} | "
-                  f"Reward: {ep_reward:7.2f} | {global_step/max(elapsed,1):.0f} steps/s")
+            sps = global_step / max(elapsed, 1)
+            pct = 100.0 * global_step / timesteps
+            rem = (timesteps - global_step) / max(sps, 1)
+            hrs, rem_s = divmod(int(rem), 3600)
+            mins, secs = divmod(rem_s, 60)
+            print(f"    [{pct:5.1f}%] Ep {episode_count:5d} | Step {global_step:7d}/{timesteps:,} | "
+                  f"Rwd {ep_reward:7.2f} | {sps:.0f} steps/s | ETA {hrs:02d}:{mins:02d}:{secs:02d}")
 
     env.close()
 
@@ -455,7 +460,7 @@ def main():
     for config_name in configs_to_run:
         if config_name not in ABLATION_CONFIGS:
             print(f"  WARNING: Unknown config '{config_name}', skipping.")
-            progress.update(1, label=config_name)
+            progress.update(1, extra=config_name)
             continue
 
         try:
@@ -491,7 +496,9 @@ def main():
         except Exception:
             traceback.print_exc()
             print(f"  FAILED: {config_name}, skipping.")
-        progress.update(1, label=config_name)
+        progress.update(1, extra=config_name)
+
+    progress.done()
 
     # Summary table
     print(f"\n{'='*72}")
