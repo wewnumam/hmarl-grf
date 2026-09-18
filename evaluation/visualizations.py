@@ -838,7 +838,7 @@ def plot_ablation_study(
 
     ax.set_yticks(range(n))
     ax.set_yticklabels(configs)
-    ax.set_xlabel(r'RCI$_{cat}$')
+    ax.set_xlabel('Win Rate (%)')
     ax.invert_yaxis()  # Highest value on top
 
     # Reference line for full model

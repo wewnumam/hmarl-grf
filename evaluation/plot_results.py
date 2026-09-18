@@ -150,10 +150,19 @@ def generate_plots_from_results(
         # Try parent dir
         ablation_data = load_json(os.path.join(results_dir, '..', 'ablation_results.json'))
     if ablation_data:
-        plot_ablation_study(
-            ablation_data,
-            os.path.join(output_dir, '09_ablation.png'),
-        )
+        # Extract win_rate per config from nested summary
+        summary = ablation_data.get('summary', ablation_data)
+        ablation_flat = {}
+        for name, metrics in summary.items():
+            if isinstance(metrics, dict):
+                ablation_flat[name] = metrics.get('win_rate', 0.0)
+            else:
+                ablation_flat[name] = metrics  # already scalar
+        if ablation_flat:
+            plot_ablation_study(
+                ablation_flat,
+                os.path.join(output_dir, '09_ablation.png'),
+            )
 
     # --- 10. Tactic Transitions ---
     strategies = load_json(os.path.join(results_dir, 'strategies.json'))
