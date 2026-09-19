@@ -214,19 +214,18 @@ class CentralizedInferenceNet(nn.Module):
     For GRF 11v11: centralized input = concatenation of all agents' observations.
     """
 
-    def __init__(self, obs_dim: int = OBS_DIM, num_agents: int = NUM_AGENTS,
+    def __init__(self, obs_dim: int = OBS_DIM,
                  latent_dim: int = LATENT_DIM, hidden: int = 128):
         super().__init__()
-        centralized_dim = obs_dim * num_agents
         self.net = nn.Sequential(
-            nn.Linear(centralized_dim, hidden), nn.ReLU(),
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, latent_dim),
         )
 
-    def forward(self, centralized_obs: torch.Tensor) -> torch.Tensor:
-        """centralized_obs (batch, obs_dim * num_agents) -> z_pred (batch, latent_dim)"""
-        return self.net(centralized_obs)
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """obs (batch, obs_dim) -> z_pred (batch, latent_dim)"""
+        return self.net(obs)
 
 
 # ---------------------------------------------------------------------------
