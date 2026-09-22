@@ -71,19 +71,17 @@ def _move_toward(from_pos: List[float], to_pos: List[float]) -> int:
             return ACT_BOTTOM_LEFT
 
 
-def _get_open_teammate(game_state: Dict, player_idx: int) -> Optional[int]:
-    """Find an open teammate (simplified: closest teammate with no nearby opponent)."""
+def _get_best_pass_target(game_state: Dict, player_idx: int) -> Optional[int]:
+    """Find best pass target: open teammate, prioritizing forward positions."""
     player_pos = get_player_position(game_state, 'left', player_idx)
-    ball_pos = get_ball_position(game_state)
 
     best_idx = None
-    best_score = float('inf')
+    best_score = -float('inf')
 
     for i in range(11):
         if i == player_idx:
             continue
         teammate_pos = get_player_position(game_state, 'left', i)
-        dist_to_teammate = get_distance(player_pos, teammate_pos)
 
         # Check if teammate is open (no opponent very close)
         is_open = True
@@ -93,8 +91,16 @@ def _get_open_teammate(game_state: Dict, player_idx: int) -> Optional[int]:
                 is_open = False
                 break
 
-        if is_open and dist_to_teammate < best_score:
-            best_score = dist_to_teammate
+        if not is_open:
+            continue
+
+        # Score: forward progression weighted 3x, distance penalized
+        forward_bonus = (teammate_pos[0] - player_pos[0]) * 3.0
+        dist_penalty = get_distance(player_pos, teammate_pos) * 0.5
+        score = forward_bonus - dist_penalty
+
+        if score > best_score:
+            best_score = score
             best_idx = i
 
     return best_idx
@@ -168,19 +174,22 @@ class ExpertPolicy:
         self, game_state: Dict, player_pos: List[float],
         ball_pos: List[float], has_ball: bool, dist_to_ball: float,
     ) -> int:
-        """Goalkeeper: stay near goal, pass when has ball."""
-        goal_pos = [-1.0, 0.0]  # Own goal position
-
+        """Goalkeeper: track ball, stay between ball and own goal."""
         if has_ball:
-            open_teammate = _get_open_teammate(game_state, 0)
-            if open_teammate is not None:
+            target = _get_best_pass_target(game_state, 0)
+            if target is not None:
                 return ACT_SHORT_PASS
             return ACT_HIGH_PASS
 
-        # Stay between ball and goal
-        if dist_to_ball > 0.15:
-            return _move_toward(player_pos, goal_pos)
-        return _move_toward(player_pos, ball_pos)
+        # Ball deep in our zone: rush out to intercept
+        if ball_pos[0] < -0.3 and dist_to_ball < 0.15:
+            return _move_toward(player_pos, ball_pos)
+
+        # Stay between ball and goal, tracking ball y
+        goal_x = -1.0
+        target_x = max(ball_pos[0] * 0.1 + goal_x * 0.9, -0.95)
+        target_y = ball_pos[1] * 0.3
+        return _move_toward(player_pos, [target_x, target_y])
 
     def _defender_action(
         self, game_state: Dict, player_idx: int,
@@ -190,13 +199,10 @@ class ExpertPolicy:
     ) -> int:
         """Defender actions based on sub-goal and conditions."""
         if has_ball:
-            open_teammate = _get_open_teammate(game_state, player_idx)
-            if open_teammate is not None:
-                teammate_pos = get_player_position(game_state, 'left', open_teammate)
-                # Progressive pass: toward opponent goal (ball_x > current)
-                if teammate_pos[0] > player_pos[0]:
-                    return ACT_SHORT_PASS
-            # Safe to dribble if no opponent close
+            target = _get_best_pass_target(game_state, player_idx)
+            if target is not None:
+                return ACT_SHORT_PASS
+            # Safe to dribble forward if no opponent close
             if min_opp_dist > self.d_safe:
                 return ACT_DRIBBLE
             return ACT_LONG_PASS
@@ -234,11 +240,8 @@ class ExpertPolicy:
     ) -> int:
         """Midfielder actions based on sub-goal and conditions."""
         if has_ball:
-            open_teammate = _get_open_teammate(game_state, player_idx)
-            if open_teammate is not None:
-                teammate_pos = get_player_position(game_state, 'left', open_teammate)
-                if teammate_pos[0] > player_pos[0]:
-                    return ACT_SHORT_PASS
+            target = _get_best_pass_target(game_state, player_idx)
+            if target is not None:
                 return ACT_SHORT_PASS
             if min_opp_dist > self.d_safe:
                 return ACT_DRIBBLE
@@ -272,12 +275,15 @@ class ExpertPolicy:
             goal_pos = [1.0, 0.0]
             dist_to_goal = get_distance(player_pos, goal_pos)
 
-            # Shoot if close enough
-            if dist_to_goal < self.d_shoot:
+            # Shoot if close to goal with reasonable angle
+            if dist_to_goal < self.d_shoot and player_pos[0] > 0.5:
+                return ACT_SHOT
+            # Also shoot from very close, centered
+            if dist_to_goal < 0.15 and abs(player_pos[1]) < 0.1:
                 return ACT_SHOT
 
-            open_teammate = _get_open_teammate(game_state, player_idx)
-            if open_teammate is not None:
+            target = _get_best_pass_target(game_state, player_idx)
+            if target is not None:
                 return ACT_SHORT_PASS
 
             if min_opp_dist > self.d_safe:
@@ -285,14 +291,15 @@ class ExpertPolicy:
             return ACT_HIGH_PASS
 
         if sub_goal == SUBGOAL_WING_ATTACK:
-            # Sprint along wing
             if role in (ROLE_LM, ROLE_RM):
-                target = [0.7, 0.35 if role == ROLE_LM else -0.35]
+                wing_y = 0.35 if role == ROLE_LM else -0.35
+                target_x = max(ball_pos[0] + 0.2, 0.5)
+                target = [target_x, wing_y]
                 if dist_to_ball < 0.2:
                     return ACT_SPRINT
                 return _move_toward(player_pos, target)
-            # CF: position between defenders
-            target = [0.7, ball_pos[1] * 0.5]
+            # CF: position ahead of ball between defenders
+            target = [max(ball_pos[0] + 0.1, 0.4), ball_pos[1] * 0.5]
             return _move_toward(player_pos, target)
 
         if sub_goal == SUBGOAL_BUILD_UP:

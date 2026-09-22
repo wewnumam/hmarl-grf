@@ -52,7 +52,7 @@ from hmarl.metrics import (
 from hmarl.rci import compute_rci
 from evaluation.visualizations import (
     plot_role_heatmap,
-    plot_formation_snapshot,
+    plot_positions,
     plot_action_distribution,
     plot_macro_strategy_timeline,
     plot_compactness_over_time,
@@ -375,11 +375,9 @@ def evaluate_hmarl(
             # Formation snapshots (start, mid, late)
             for ts, label in [(0, 'start'), (min(1500, len(all_game_states_flat)//2), 'mid'),
                               (min(2999, len(all_game_states_flat)-1), 'late')]:
-                plot_formation_snapshot(
-                    all_game_states_flat,
-                    os.path.join(plots_dir, f"05_formation_{label}.png"),
-                    timestep=ts,
-                    title=f"Formation Snapshot ({label})",
+                plot_positions(
+                    [all_game_states_flat[ts]],
+                    step=ts,
                 )
         # Action distribution
         if all_actual_actions_flat and all_roles:

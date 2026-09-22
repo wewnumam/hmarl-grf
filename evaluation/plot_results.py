@@ -19,11 +19,11 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 
 from evaluation.visualizations import (
-    plot_learning_curve,
+    plot_mean_episode_reward,
     plot_rci_evolution,
     plot_comparative_bars,
     plot_role_heatmap,
-    plot_formation_snapshot,
+    plot_positions,
     plot_action_distribution,
     plot_macro_strategy_timeline,
     plot_compactness_over_time,
@@ -31,6 +31,10 @@ from evaluation.visualizations import (
     plot_tactic_transitions,
     plot_reward_breakdown,
     plot_metric_correlation,
+    plot_pass_network,
+    plot_iad_per_line,
+    plot_convex_hull,
+    plot_action_transitions,
 )
 
 
@@ -93,10 +97,9 @@ def generate_plots_from_results(
                 rewards_data[name.upper()] = data['episode_rewards']
 
         if rewards_data:
-            plot_learning_curve(
+            plot_mean_episode_reward(
                 rewards_data,
-                os.path.join(output_dir, '01_learning_curve.png'),
-                window=50,
+                os.path.join(output_dir, '01_mean_episode_reward.png'),
             )
 
     # --- 2. RCI Evolution ---
@@ -255,10 +258,9 @@ def generate_demo_plots(output_dir: str):
     shppo_rewards = (base_rewards * 0.8 - 10 + noise * 1.2).tolist()
     mappo_rewards = (base_rewards * 0.7 - 15 + noise * 1.3).tolist()
 
-    plot_learning_curve(
+    plot_mean_episode_reward(
         {'HMARL': hmarl_rewards, 'IPPO': ippo_rewards, 'SHPPO': shppo_rewards, 'MAPPO': mappo_rewards},
-        os.path.join(output_dir, '01_learning_curve.png'),
-        window=30,
+        os.path.join(output_dir, '01_mean_episode_reward.png'),
     )
 
     # --- 2. RCI Evolution (demo) ---
@@ -335,8 +337,11 @@ def generate_demo_plots(output_dir: str):
             x = bp[0] + np.random.normal(0, 0.08) + ball_x * 0.15
             y = bp[1] + np.random.normal(0, 0.06)
             positions.append([np.clip(x, -1, 1), np.clip(y, -0.42, 0.42)])
+        # Synthetic right-team positions (mirror of left)
+        right_positions = [[-x, y] for x, y in positions]
         demo_game_states.append({
             'left_team': positions,
+            'right_team': right_positions,
             'left_team_roles': [0, 1, 1, 2, 3, 4, 5, 5, 6, 7, 9],
             'ball': [ball_x, np.random.uniform(-0.42, 0.42), 0.1],
         })
@@ -346,12 +351,10 @@ def generate_demo_plots(output_dir: str):
         os.path.join(output_dir, '04_role_heatmap.png'),
     )
 
-    # --- 5. Formation Snapshot (demo) ---
-    plot_formation_snapshot(
-        demo_game_states,
-        os.path.join(output_dir, '05_formation_mid.png'),
-        timestep=n_frames // 2,
-        title='Formation Snapshot (mid-match)',
+    # --- 5. Positions (formation snapshot, demo) ---
+    plot_positions(
+        [demo_game_states[n_frames // 2]],
+        step=n_frames // 2,
     )
 
     # --- 6. Action Distribution (demo) ---
@@ -460,6 +463,42 @@ def generate_demo_plots(output_dir: str):
             'wr': np.random.uniform(40, 80, n_pts).tolist(),
         },
         os.path.join(output_dir, '12_correlation_heatmap.png'),
+    )
+
+    # --- 13. Pass Network (demo) ---
+    # Synthetic 11x11 pass count matrix
+    pass_mat = np.zeros((11, 11))
+    for i in range(11):
+        for j in range(11):
+            if i != j:
+                pass_mat[i, j] = max(0, int(np.random.exponential(8)))
+    plot_pass_network(
+        pass_mat,
+        os.path.join(output_dir, '13_pass_network.png'),
+    )
+
+    # --- 14. Inter-Agent Distance Per Line (demo) ---
+    plot_iad_per_line(
+        {
+            'defence_midfield_gap': 12.4,
+            'midfield_attack_gap': 15.7,
+            'overall_spread': 28.1,
+        },
+        os.path.join(output_dir, '14_iad_per_line.png'),
+    )
+
+    # --- 15. Convex Hull Area Over Time (demo) ---
+    plot_convex_hull(
+        demo_game_states[:500],
+        os.path.join(output_dir, '15_convex_hull.png'),
+    )
+
+    # --- 16. Action Transition Probabilities (demo) ---
+    n_actions = 19
+    trans = np.random.dirichlet(np.ones(n_actions), size=n_actions)
+    plot_action_transitions(
+        trans,
+        os.path.join(output_dir, '16_action_transitions.png'),
     )
 
     print(f'\nAll demo plots saved to: {output_dir}')

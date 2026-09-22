@@ -59,20 +59,33 @@ class HighLevelPolicy:
     def decide(self, game_state: Dict) -> int:
         """Select macro strategy based on global state.
 
-        Rules (from thesis Table 5):
+        Rules (extended from thesis Table 5):
         - ball_owned_team != our team -> High Pressing
-        - ball_owned_team == our team AND ball_x < 0.3 -> Possession Play
         - ball_owned_team == our team AND ball_x >= 0.3 -> Counter Attack
+        - ball_owned_team == our team AND ball_x < 0.3 ->
+            check local numerical advantage at ball position
         """
-        if not ball_owned_by_us(game_state, team_id=0):
+        ball_x = get_ball_x(game_state)
+        has_possession = ball_owned_by_us(game_state, team_id=0)
+
+        if not has_possession:
             return STRATEGY_HIGH_PRESSING
 
-        ball_x = get_ball_x(game_state)
-
-        if ball_x < 0.3:
-            return STRATEGY_POSSESSION
-        else:
+        if ball_x >= 0.3:
             return STRATEGY_COUNTER_ATTACK
+
+        # In midfield/back with ball: check numerical advantage
+        ball_pos = get_ball_position(game_state)
+        our_near = sum(
+            1 for i in range(11)
+            if get_distance(get_player_position(game_state, 'left', i), ball_pos) < 0.2
+        )
+        opp_near = sum(
+            1 for j in range(11)
+            if get_distance(get_player_position(game_state, 'right', j), ball_pos) < 0.2
+        )
+
+        return STRATEGY_COUNTER_ATTACK if our_near > opp_near else STRATEGY_POSSESSION
 
 
 # ---------------------------------------------------------------------------
@@ -92,43 +105,43 @@ class MidLevelPolicy:
     def decide(self, game_state: Dict, player_idx: int, macro_strategy: int) -> int:
         """Select sub-goal for a specific player based on role and macro strategy.
 
-        Rules from thesis Table 6:
-        - CB, FB: Zonal Marking (defense/counter), Build-up (possession)
-        - CM: Clearance (defense/counter), Build-up (possession)
-        - WG, CF: Wing Attack (defense/counter), Build-up (possession)
+        Rules (extended from thesis Table 6):
         - GK: Zonal Marking always
+        - CB, FB: Clearance if ball in defensive zone, else Zonal Marking / Build-up
+        - CM: Clearance if ball in defensive zone, else Clearance / Build-up
+        - WG, CF: Wing Attack if ball on wing, else Man Marking / Build-up
         """
         role = get_player_role(game_state, 'left', player_idx)
         ball_pos = get_ball_position(game_state)
-        player_pos = get_player_position(game_state, 'left', player_idx)
+        ball_in_defense = ball_pos[0] < -0.3
 
-        # GK always does Zonal Marking (goal area control)
         if role == ROLE_GK:
             return SUBGOAL_ZONAL_MARKING
 
         # Defensive roles: CB, LB, RB
         if role in (ROLE_CB, ROLE_LB, ROLE_RB):
+            if ball_in_defense:
+                return SUBGOAL_CLEARANCE
             if macro_strategy in (STRATEGY_HIGH_PRESSING, STRATEGY_COUNTER_ATTACK):
                 return SUBGOAL_ZONAL_MARKING
-            else:  # STRATEGY_POSSESSION
-                return SUBGOAL_BUILD_UP
+            return SUBGOAL_BUILD_UP
 
         # Midfield roles: DM, CM, AM
         if role in (ROLE_DM, ROLE_CM, ROLE_AM):
+            if ball_in_defense:
+                return SUBGOAL_CLEARANCE
             if macro_strategy in (STRATEGY_HIGH_PRESSING, STRATEGY_COUNTER_ATTACK):
                 return SUBGOAL_CLEARANCE
-            else:
-                return SUBGOAL_BUILD_UP
+            return SUBGOAL_BUILD_UP
 
         # Attack roles: LM (wing), RM (wing), CF (center forward)
         if role in (ROLE_LM, ROLE_RM, ROLE_CF):
             if macro_strategy in (STRATEGY_HIGH_PRESSING, STRATEGY_COUNTER_ATTACK):
-                # Wing players go Wing Attack; CF also goes Wing Attack
-                return SUBGOAL_WING_ATTACK
-            else:
-                return SUBGOAL_BUILD_UP
+                if abs(ball_pos[1]) > 0.15:
+                    return SUBGOAL_WING_ATTACK
+                return SUBGOAL_MAN_MARKING
+            return SUBGOAL_BUILD_UP
 
-        # Default
         return SUBGOAL_BUILD_UP
 
 

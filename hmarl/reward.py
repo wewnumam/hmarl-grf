@@ -53,19 +53,20 @@ def compute_formation_targets(
     ball_x = ball_pos[0]
     ball_y = ball_pos[1]
 
-    # Formation template (role_id -> [x, y])
+    # 4-3-3 formation template (role_id -> [x, y])
+    # Aligns with env.py FORMATION_433 role assignments
     template = [
-        [-0.95, 0.0],   # 0: GK
-        [-0.5, -0.15],   # 1: CB
-        [-0.5, 0.15],    # 2: CB
-        [-0.3, -0.35],   # 3: LB
-        [-0.3, 0.35],    # 4: RB
-        [-0.1, 0.0],     # 5: DM
-        [0.1, -0.2],     # 6: CM
-        [0.1, 0.2],      # 7: CM
-        [0.3, -0.35],    # 8: LM
-        [0.3, 0.35],     # 9: RM
-        [0.5, 0.0],      # 10: CF
+        [-0.92,  0.00],  # 0: GK
+        [-0.62, -0.12],  # 1: CB
+        [-0.62,  0.12],  # 2: CB
+        [-0.58, -0.32],  # 3: LB
+        [-0.58,  0.32],  # 4: RB
+        [-0.30,  0.00],  # 5: DM
+        [-0.22, -0.16],  # 6: CM
+        [-0.22,  0.16],  # 7: CM
+        [ 0.25, -0.32],  # 8: LM
+        [ 0.25,  0.32],  # 9: RM
+        [ 0.38,  0.00],  # 10: CF
     ]
 
     # Shift entire formation forward/backward based on ball position

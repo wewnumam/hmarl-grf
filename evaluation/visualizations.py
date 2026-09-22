@@ -1,11 +1,11 @@
 """Visualization module for HMARL thesis evaluation.
 
 Generates all plots required for thesis chapters:
-1. Learning curve (cumulative reward vs episode)
+1. Mean episode reward (bar chart)
 2. RCI evolution over training
 3. Comparative bar chart — all metrics
-4. Role assignment heatmap
-5. Formation snapshot
+4. Role assignment heatmap (outfield only)
+5. Formation snapshot (positions plot)
 6. Action distribution by role
 7. Macro strategy duration
 8. Team compactness over time
@@ -29,6 +29,25 @@ matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
 import matplotlib.gridspec as gridspec
+
+# ---------------------------------------------------------------------------
+# Role helpers (shared with chase_ball.py)
+# ---------------------------------------------------------------------------
+DEFAULT_ROLE_ORDER = (
+    "GK", "LCB", "RCB", "LB", "RB", "CDM", "LCM", "RCM", "LW", "CF", "RW"
+)
+ENGINE_ROLE_ORDER = (
+    "GK", "LB", "LCB", "RCB", "RB", "LCM", "CDM", "RCM", "LW", "CF", "RW"
+)
+ENGINE_ROLE_IDS = (0, 7, 9, 2, 1, 1, 3, 5, 5, 5, 6)
+
+
+def get_role_order(observation):
+    """Convert the engine's current left-team role array to player role names."""
+    role_values = tuple(int(r) for r in observation[0]["left_team_roles"])
+    if role_values == ENGINE_ROLE_IDS:
+        return ENGINE_ROLE_ORDER
+    return DEFAULT_ROLE_ORDER
 
 
 # ---------------------------------------------------------------------------
@@ -178,21 +197,21 @@ def _rolling_std(data: List[float], window: int = 10) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# 1. Learning Curve
+# 1. Mean Episode Reward
 # ---------------------------------------------------------------------------
-def plot_learning_curve(
+def plot_mean_episode_reward(
     data: Dict[str, List[float]],
     output_path: str,
     window: int = 50,
-    title: str = 'Learning Curve',
+    title: str = 'Mean Episode Reward',
 ):
-    """Plot cumulative reward vs episode for multiple models.
+    """Mean episode reward over training with rolling average and ±1 std band.
 
     Args:
-        data: dict mapping model_name -> list of episode rewards
+        data: dict mapping model_name -> list of per-episode rewards
         output_path: path to save the figure
         window: rolling average window size
-        title: plot title (ignored for thesis figures — use caption instead)
+        title: plot title
     """
     _apply_style()
     fig, ax = plt.subplots(figsize=(8, 4.5))
@@ -214,7 +233,7 @@ def plot_learning_curve(
                     linestyle=style['linestyle'], label=model, linewidth=1.5)
 
     ax.set_xlabel('Episode')
-    ax.set_ylabel('Cumulative Reward')
+    ax.set_ylabel('Mean Episode Reward')
     ax.legend(frameon=True, framealpha=0.9, edgecolor='#cccccc',
               loc='best')
     fig.tight_layout()
@@ -371,14 +390,9 @@ def plot_role_heatmap(
     grid_shape: Tuple[int, int] = (12, 8),
     title: str = 'Player Position Heatmap',
 ):
-    """2D histogram on football pitch showing position frequency per role.
+    """2D histogram on football pitch showing position frequency per outfield role.
 
-    Args:
-        game_states: list of game state dicts (each with 'left_team' positions)
-        output_path: path to save
-        team_side: 'left' or 'right'
-        grid_shape: (nx, ny) grid for the heatmap
-        title: plot title
+    GK excluded — focus on tactical outfield positions.
     """
     _apply_style()
     nx, ny = grid_shape
@@ -388,37 +402,33 @@ def plot_role_heatmap(
     key = f'{team_side}_team'
     roles_key = f'{team_side}_team_roles'
 
-    # Collect all positions
+    # Collect all positions (skip GK at index 0)
     all_positions = []
     for gs in game_states:
         positions = gs.get(key, [])
         if len(positions) >= 11:
-            all_positions.append(positions[:11])
+            all_positions.append(positions[1:11])  # skip GK
 
     if not all_positions:
         print(f'No data for heatmap ({team_side} team)')
         return
 
-    positions_arr = np.array(all_positions)  # (T, 11, 2)
+    positions_arr = np.array(all_positions)  # (T, 10, 2)
 
     # Scale to pitch coordinates
     x_scaled = (positions_arr[:, :, 0] + 1.0) * 60.0
     y_scaled = (positions_arr[:, :, 1] + 0.42) * (80.0 / 0.84)
 
-    # Get roles from first frame
-    roles = game_states[0].get(roles_key, list(range(11)))[:11]
+    # Get roles from first frame, skip GK (index 0)
+    roles = game_states[0].get(roles_key, list(range(11)))[:11][1:]
 
-    fig, axes = plt.subplots(3, 4, figsize=(16, 12))
+    fig, axes = plt.subplots(2, 5, figsize=(16, 8))
     axes = axes.flatten()
 
-    # Create pitch background helper
     def draw_pitch(ax):
-        # Pitch outline
         ax.add_patch(Rectangle((0, 0), pitch_length, pitch_width,
                               fill=False, edgecolor='gray', linewidth=0.8))
-        # Center line
         ax.axvline(x=pitch_length/2, color='gray', linewidth=0.5, alpha=0.5)
-        # Center circle
         circle = plt.Circle((pitch_length/2, pitch_width/2), 9.15,
                            fill=False, edgecolor='gray', linewidth=0.5, alpha=0.5)
         ax.add_patch(circle)
@@ -428,37 +438,28 @@ def plot_role_heatmap(
         ax.set_xticks([])
         ax.set_yticks([])
 
-    for i in range(11):
-        if i >= len(axes):
-            break
+    for i in range(10):
         ax = axes[i]
         draw_pitch(ax)
 
         role_id = roles[i] if i < len(roles) else i
-        role_name = ROLE_NAMES.get(role_id, f'P{i}')
+        role_name = ROLE_NAMES.get(role_id, f'P{i+1}')
 
         px = x_scaled[:, i]
         py = y_scaled[:, i]
 
-        # 2D histogram
         h, xedges, yedges = np.histogram2d(
             px, py, bins=[nx, ny],
             range=[[0, pitch_length], [0, pitch_width]],
         )
 
-        # Plot heatmap
         im = ax.pcolormesh(xedges, yedges, h.T, cmap='hot', alpha=0.8)
 
         ax.set_title(f'{role_name} (n={len(px)})', fontsize=10, fontweight='bold')
 
-    # Add subplot label (a) in top-left of first axes
     axes[0].text(0.02, 0.98, '(a)', transform=axes[0].transAxes,
                  fontsize=11, fontweight='bold', va='top')
 
-    # Remove extra axes
-    for j in range(11, len(axes)):
-        fig.delaxes(axes[j])
-
     fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
@@ -466,102 +467,67 @@ def plot_role_heatmap(
 
 
 # ---------------------------------------------------------------------------
-# 5. Formation Snapshot
+# 5. Formation Snapshot (Positions Plot)
 # ---------------------------------------------------------------------------
-def plot_formation_snapshot(
-    game_states: List[Dict],
-    output_path: str,
-    timestep: int = 0,
-    team_side: str = 'left',
-    show_target: bool = True,
-    title: str = 'Formation Snapshot',
-):
-    """Scatter plot of agent positions at a specific timestep on the field.
-
-    Args:
-        game_states: list of game state dicts
-        output_path: path to save
-        timestep: which frame to plot
-        team_side: 'left' or 'right'
-        show_target: whether to show ideal formation positions
-        title: plot title
-    """
-    _apply_style()
-    pitch_length = 120.0
-    pitch_width = 80.0
-
-    if timestep >= len(game_states):
-        timestep = len(game_states) - 1
-
-    gs = game_states[timestep]
-    key = f'{team_side}_team'
-    roles_key = f'{team_side}_team_roles'
-
-    positions = gs.get(key, [])[:11]
-    roles = gs.get(roles_key, list(range(11)))[:11]
-
-    # Scale to pitch
-    x = np.array([p[0] for p in positions]) * 60.0 + 60.0
-    y = np.array([p[1] for p in positions]) * (80.0 / 0.84) + 33.6
-
-    # Formation template targets (scaled to pitch)
-    targets = np.array([
-        [5.0, 40.0],    # GK
-        [30.0, 28.0],   # CB
-        [30.0, 52.0],   # CB
-        [42.0, 12.0],   # LB
-        [42.0, 68.0],   # RB
-        [54.0, 40.0],   # DM
-        [66.0, 24.0],   # CM
-        [66.0, 56.0],   # CM
-        [78.0, 12.0],   # LM
-        [78.0, 68.0],   # RM
-        [90.0, 40.0],   # CF
-    ])
-
-    fig, ax = plt.subplots(figsize=(10, 7))
-
-    # Draw pitch
-    ax.add_patch(Rectangle((0, 0), pitch_length, pitch_width,
-                          fill=False, edgecolor='gray', linewidth=1))
-    ax.axvline(x=pitch_length/2, color='gray', linewidth=0.5, alpha=0.5)
-    circle = plt.Circle((pitch_length/2, pitch_width/2), 9.15,
-                       fill=False, edgecolor='gray', linewidth=0.5, alpha=0.5)
+def plot_positions(observation, step: int) -> None:
+    """Save team positions, ball position, and role connections."""
+    state = observation[0]
+    role_order = get_role_order(observation)
+    left_positions = np.asarray(state["left_team"], dtype=float)
+    if "right_team" in state:
+        right_positions = np.asarray(state["right_team"], dtype=float)
+    else:
+        right_positions = np.zeros_like(left_positions)
+    ball_position = np.asarray(state["ball"][:2], dtype=float)
+    fig, ax = plt.subplots(figsize=(12, 7))
+    ax.set_facecolor("#2f7d4a")
+    fig.patch.set_facecolor("white")
+    ax.set_xlim(-1.0, 1.0)
+    ax.set_ylim(-0.42, 0.42)
+    ax.axvline(0.0, color="white", linewidth=1)
+    ax.plot([-1, -1, 1, 1, -1], [-0.42, 0.42, 0.42, -0.42, -0.42],
+            color="white", linewidth=1)
+    circle = plt.Circle((0, 0), 0.105, fill=False, color="white")
     ax.add_patch(circle)
-    # Penalty areas
-    ax.add_patch(Rectangle((0, 16.5), 16.5, 47.0, fill=False, edgecolor='gray', linewidth=0.5))
-    ax.add_patch(Rectangle((pitch_length - 16.5, 16.5), 16.5, 47.0,
-                          fill=False, edgecolor='gray', linewidth=0.5))
 
-    # Plot actual positions
-    for i in range(min(11, len(positions))):
-        role_id = roles[i] if i < len(roles) else i
-        role_name = ROLE_NAMES.get(role_id, f'P{i}')
-        color = ROLE_COLORS.get(role_name, '#333333')
+    role_ids = {role: role_id for role_id, role in enumerate(role_order)}
+    left = {role: left_positions[role_ids[role]][:2] for role in role_order}
+    right = {role: right_positions[role_ids[role]][:2] for role in role_order}
 
-        ax.scatter(x[i], y[i], c=color, s=500, zorder=3,
-                  edgecolors='white', linewidth=1.5)
-        ax.annotate(role_name, (x[i], y[i]), fontsize=12, fontweight='bold',
-                   color='white', ha='center', va='center', zorder=4)
+    ax.scatter(
+        ball_position[0], ball_position[1],
+        c="#fdd835", edgecolors="black", s=140, marker="*",
+        label="Ball", zorder=4,
+    )
 
-    # Plot target formation
-    if show_target:
-        ax.scatter(targets[:, 0], targets[:, 1], c='none',
-                  s=500, edgecolors='gray', linewidth=1, linestyle='--',
-                  zorder=2, alpha=0.5, label='Target Formation')
+    for positions, color, team_name, marker in (
+        (left_positions, "#1976d2", "Left team", "o"),
+        (right_positions, "#d32f2f", "Right team", "s"),
+    ):
+        ax.scatter(
+            positions[:, 0], positions[:, 1],
+            c=color, edgecolors="white", s=100, marker=marker,
+            label=team_name, zorder=3,
+        )
+        for role_name, position in zip(role_order, positions):
+            ax.annotate(
+                f'{state["left_team_roles"][role_order.index(role_name)]}: {role_name}',
+                (position[0], position[1]),
+                xytext=(5, 5), textcoords="offset points",
+                fontsize=8, color="black",
+                bbox={"facecolor": "white", "alpha": 0.75, "pad": 1},
+            )
 
-    ax.set_xlim(-2, pitch_length + 2)
-    ax.set_ylim(-2, pitch_width + 2)
-    ax.set_aspect('equal')
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_title(f'{title} (t={timestep})', fontsize=12)
-    ax.legend(loc='upper right', fontsize=8)
-
+    ax.set_title(f"Team Positions - Step {step}")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.legend(loc="upper center", ncol=2)
+    ax.grid(color="white", alpha=0.2)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
+    output_path = f"evaluation_results/plots/positions_step_{step}.png"
+    fig.savefig(output_path, dpi=160)
     plt.close(fig)
-    print(f'Saved: {output_path}')
+    print(f"Saved starting-position plot: {output_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -1176,17 +1142,10 @@ def generate_all_plots(
             os.path.join(output_dir, '04_role_heatmap.png'),
         )
 
-    # --- Plot 5: Formation snapshot ---
-    if game_states:
-        # Plot at start, middle, and late timesteps
-        for ts, label in [(0, 'start'), (len(game_states)//2, 'mid'), (-1, 'late')]:
-            actual_ts = ts if ts >= 0 else len(game_states) + ts
-            plot_formation_snapshot(
-                game_states,
-                os.path.join(output_dir, f'05_formation_{label}.png'),
-                timestep=actual_ts,
-                title=f'Formation Snapshot ({label})',
-            )
+    # --- Plot 5: Positions (formation snapshot) ---
+    # Note: plot_positions(observation, step) is called directly with GRF
+    # observation dicts, not through generate_all_plots.  Call it explicitly
+    # from the evaluation loop when an observation is available.
 
     # --- Plot 6: Action distribution ---
     if actions and roles:
@@ -1265,40 +1224,46 @@ def plot_pass_network(
     pass_matrix: np.ndarray,
     output_path: str,
     roles: Optional[List[int]] = None,
+    observation: Optional[Any] = None,
+    team_side: str = 'left',
     title: str = 'Pass Network',
 ):
     """Weighted directed graph of pass connections between players.
 
-    Args:
-        pass_matrix: (11, 11) pass count matrix from pass_network_matrix()
-        output_path: path to save figure
-        roles: list of 11 role IDs for labeling; defaults to 0-10
-        title: plot title
+    When observation is provided, nodes are placed at actual player positions.
+    Otherwise falls back to a fixed formation layout.
     """
     _apply_style()
     fig, ax = plt.subplots(figsize=(8, 6))
 
     n = pass_matrix.shape[0]
-    # Fixed positions: GK left, defenders, midfielders, attackers right
-    # Layout: 4-2-4 on a half-pitch
-    positions = {
-        0: (0.10, 0.50),   # GK
-        1: (0.30, 0.70),   # CB
-        2: (0.30, 0.25),   # LB
-        3: (0.30, 0.75),   # RB
-        4: (0.50, 0.35),   # DM
-        5: (0.50, 0.65),   # CM
-        6: (0.70, 0.15),   # LM
-        7: (0.70, 0.40),   # RM
-        8: (0.70, 0.60),   # AM
-        9: (0.70, 0.85),   # CF
-        10: (0.85, 0.50),  # CF2
-    }
 
-    role_names = roles if roles else list(range(n))
-    labels = [ROLE_NAMES.get(role_names[i], str(i)) for i in range(n)]
+    if observation is not None:
+        state = observation[0]
+        role_order = get_role_order(observation)
+        team_key = f'{team_side}_team'
+        raw = np.asarray(state[team_key], dtype=float)
+        # Use GRF coords directly (-1..1 x, -0.42..0.42 y)
+        positions = {i: (raw[i][0], raw[i][1]) for i in range(n)}
+        role_names = list(role_order)
+    else:
+        positions = {
+            0: (0.10, 0.50), 1: (0.30, 0.70), 2: (0.30, 0.25),
+            3: (0.30, 0.75), 4: (0.50, 0.35), 5: (0.50, 0.65),
+            6: (0.70, 0.15), 7: (0.70, 0.40), 8: (0.70, 0.60),
+            9: (0.70, 0.85), 10: (0.85, 0.50),
+        }
+        role_names = roles if roles else list(range(n))
 
-    # Draw edges with width proportional to pass count
+    labels = [ROLE_NAMES.get(
+        role_names[i] if isinstance(role_names[i], str) else role_names[i],
+        str(i)
+    ) for i in range(n)]
+    # If role_names came from get_role_order, they're already strings
+    if observation is not None:
+        labels = [str(r) for r in role_names]
+
+    # Draw edges
     max_pass = max(pass_matrix.max(), 1)
     for i in range(n):
         for j in range(n):
@@ -1321,15 +1286,15 @@ def plot_pass_network(
         x, y = positions[i]
         total_pass = pass_matrix[i].sum()
         size = 300 + 700 * (total_pass / max(max_pass, 1))
-        role_label = ROLE_NAMES.get(role_names[i], '?')
+        role_label = labels[i]
         color = ROLE_COLORS.get(role_label, '#888888')
         ax.scatter(x, y, s=size, c=color, edgecolors='#333333',
                    linewidths=0.8, zorder=3)
         ax.annotate(labels[i], (x, y), textcoords='offset points',
                     xytext=(0, -14), ha='center', fontsize=8, fontweight='bold')
 
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    ax.set_xlim(-1.1, 1.1)
+    ax.set_ylim(-0.5, 0.5)
     ax.set_aspect('equal')
     ax.set_title(title)
     ax.axis('off')
