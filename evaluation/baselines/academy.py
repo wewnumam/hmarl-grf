@@ -1,7 +1,7 @@
 import argparse
 import gfootball.env as football_env
 import numpy as np
-import gym
+import gymnasium as gym
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
@@ -76,7 +76,7 @@ class FootballGymEnv(gym.Env):
             write_full_episode_dumps=write_full_episode_dumps,
             render=render
         )
-        
+
         # Action space: 11 agents
         self.action_space = gym.spaces.MultiDiscrete([ACTION_SPACE_SIZE] * num_agents)
         
@@ -104,31 +104,39 @@ class FootballGymEnv(gym.Env):
             )
         return obs
 
-    def reset(self) -> np.ndarray:
-        """Resets the environment to an initial state."""
-        return self._format_observation(self.env.reset())
+    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
+        """Reset the environment and return (observation, info)."""
+        if seed is not None:
+            self.env.reset(seed=seed)
 
-    def step(self, actions: Any) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
-        """Executes one timestep in the environment."""
+        result = self.env.reset()
+        if isinstance(result, tuple) and len(result) >= 2:
+            obs, info = result
+        else:
+            obs, info = result, {}
+
+        return self._format_observation(obs), info
+
+    def step(self, actions: Any):
+        """Execute one timestep in the environment."""
         if isinstance(actions, np.ndarray):
             actions = actions.tolist()
-            
+
         result = self.env.step(actions)
-        
-        # Safely unpack based on what GRF returns, converting to 4-tuple API
+
         if len(result) == 4:
             obs, reward, done, info = result
+            terminated = bool(done)
+            truncated = False
         elif len(result) == 5:
             obs, reward, terminated, truncated, info = result
-            done = terminated or truncated
         else:
             raise ValueError(f"Unexpected return from step: {len(result)} items")
-        
+
         obs = self._format_observation(obs)
         team_reward = float(np.sum(reward))
-        
-        # Return exactly 4 items expected by older Stable Baselines 3
-        return obs, team_reward, done, info
+
+        return obs, team_reward, bool(terminated), bool(truncated), info
 
     def render(self):
         """Renders the environment."""
@@ -235,7 +243,7 @@ class SoccerMatchPPO:
             self.render,
             write_full_episode_dumps=True,
         )
-        obs = eval_env.reset()
+        obs, _ = eval_env.reset()
         cumulative_rewards = []
         cumulative_reward = 0.0
 
@@ -244,7 +252,8 @@ class SoccerMatchPPO:
                 # Predict action using the trained model
                 action, _states = self.model.predict(obs, deterministic=True)
 
-                obs, reward, done, info = eval_env.step(action)
+                obs, reward, terminated, truncated, info = eval_env.step(action)
+                done = terminated or truncated
                 cumulative_reward += reward
                 cumulative_rewards.append(cumulative_reward)
 
@@ -253,7 +262,7 @@ class SoccerMatchPPO:
 
                 if done:
                     print(f"Match ended after {step} steps.")
-                    obs = self.env.reset()
+                    obs, _ = self.env.reset()
                     break
         except KeyboardInterrupt:
             print("\nEvaluation interrupted by user.")
