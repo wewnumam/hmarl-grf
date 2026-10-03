@@ -1,11 +1,11 @@
 import argparse
 import gfootball.env as football_env
 import numpy as np
-import gymnasium as gym
+import gym  # old gym: SB3 1.3.0 isinstance-checks spaces against these classes
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # --- Configuration Constants ---
 DEFAULT_ENV_NAME = "academy_empty_goal_close"
@@ -104,21 +104,21 @@ class FootballGymEnv(gym.Env):
             )
         return obs
 
-    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
-        """Reset the environment and return (observation, info)."""
+    def reset(self, *, seed: Optional[int] = None, options: Dict[str, Any] = None):
+        """Reset and return observation only (SB3 1.3.0 old-gym API)."""
         if seed is not None:
-            self.env.reset(seed=seed)
+            try:
+                self.env.reset(seed=seed)
+            except TypeError:
+                pass  # GRF build here does not accept seed kwarg
 
         result = self.env.reset()
-        if isinstance(result, tuple) and len(result) >= 2:
-            obs, info = result
-        else:
-            obs, info = result, {}
+        if isinstance(result, tuple):
+            result = result[0]
+        return self._format_observation(result)
 
-        return self._format_observation(obs), info
-
-    def step(self, actions: Any):
-        """Execute one timestep in the environment."""
+    def step(self, actions: Any) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
+        """Execute one timestep; SB3 1.3.0 expects the 4-tuple old-gym API."""
         if isinstance(actions, np.ndarray):
             actions = actions.tolist()
 
@@ -126,17 +126,16 @@ class FootballGymEnv(gym.Env):
 
         if len(result) == 4:
             obs, reward, done, info = result
-            terminated = bool(done)
-            truncated = False
         elif len(result) == 5:
             obs, reward, terminated, truncated, info = result
+            done = bool(terminated) or bool(truncated)
         else:
             raise ValueError(f"Unexpected return from step: {len(result)} items")
 
         obs = self._format_observation(obs)
         team_reward = float(np.sum(reward))
 
-        return obs, team_reward, bool(terminated), bool(truncated), info
+        return obs, team_reward, bool(done), info
 
     def render(self):
         """Renders the environment."""
@@ -230,7 +229,8 @@ class SoccerMatchPPO:
             plt.close()
             print(f"Training length plot saved to {TRAINING_LENGTH_PLOT_PATH}")
         
-        model_path = "ppo_11v11_model"
+        # ponytail: was "ppo_11v11_model" — clobbered the 11v11 baseline artifact
+        model_path = f"ppo_{ENV_NAME}_model"
         self.model.save(model_path)
         print(f"Training finished. Model saved to {model_path}.zip")
 
@@ -243,7 +243,7 @@ class SoccerMatchPPO:
             self.render,
             write_full_episode_dumps=True,
         )
-        obs, _ = eval_env.reset()
+        obs = eval_env.reset()
         cumulative_rewards = []
         cumulative_reward = 0.0
 
@@ -252,8 +252,7 @@ class SoccerMatchPPO:
                 # Predict action using the trained model
                 action, _states = self.model.predict(obs, deterministic=True)
 
-                obs, reward, terminated, truncated, info = eval_env.step(action)
-                done = terminated or truncated
+                obs, reward, done, info = eval_env.step(action)
                 cumulative_reward += reward
                 cumulative_rewards.append(cumulative_reward)
 
@@ -262,7 +261,7 @@ class SoccerMatchPPO:
 
                 if done:
                     print(f"Match ended after {step} steps.")
-                    obs, _ = self.env.reset()
+                    obs = self.env.reset()
                     break
         except KeyboardInterrupt:
             print("\nEvaluation interrupted by user.")

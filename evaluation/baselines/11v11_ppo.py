@@ -99,7 +99,7 @@ class SoccerMatchPPO:
             n_steps=2048,       # More steps per update for PPO stability
             batch_size=64,
             n_epochs=10,
-            gamma=0.99,
+            gamma=1.0,           # Song et al. (2024): gamma=1 for 11v11
             gae_lambda=0.95,
             clip_range=0.2,
             ent_coef=0.01

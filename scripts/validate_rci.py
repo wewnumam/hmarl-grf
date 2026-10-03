@@ -382,6 +382,146 @@ def sensitivity_analysis(
 
 
 # ===========================================================================
+# 5. GROUND TRUTH CHECK — Expert Policy Win Rate
+# ===========================================================================
+
+def ground_truth_check(
+    n_episodes: int = 50,
+    seed: int = 42,
+) -> Dict:
+    """Run expert policy alone (no learning) vs bot 1.0, measure win rate.
+
+    Critical check: if the expert policy itself cannot beat bot 1.0,
+    then RCI measured against this expert is meaningless as a quality metric.
+
+    Returns dict with win_rate, avg_goals_for, avg_goals_against.
+    """
+    try:
+        from hmarl.env import create_raw_env, extract_game_state, NUM_AGENTS
+        from hmarl.expert import ExpertPolicyAllAgents
+        from hmarl.policy import HierarchicalController
+        from hmarl.utils import set_seed
+
+        set_seed(seed)
+        env = create_raw_env(render=False)
+        controller = HierarchicalController()
+        expert = ExpertPolicyAllAgents()
+
+        wins, draws, losses = 0, 0, 0
+        goals_for_total, goals_against_total = 0, 0
+
+        for ep in range(n_episodes):
+            reset_result = env.reset()
+            obs_raw = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+            game_state = extract_game_state(obs_raw)
+            done, step = False, 0
+            ep_gf, ep_ga = 0, 0
+
+            while not done and step < 3000:
+                macro = controller.get_macro_strategy(game_state)
+                sub_goals = controller.get_sub_goals(game_state, macro)
+                ideal_actions = expert.get_ideal_actions(game_state, sub_goals, macro)
+
+                step_result = env.step(ideal_actions)
+                if len(step_result) == 5:
+                    obs_raw, _, terminated, truncated, _ = step_result
+                    done = terminated or truncated
+                else:
+                    obs_raw, _, done, _ = step_result
+
+                new_gs = extract_game_state(obs_raw)
+                score = new_gs.get('score', [0, 0])
+                if score[0] > ep_gf:
+                    ep_gf = score[0]
+                if score[1] > ep_ga:
+                    ep_ga = score[1]
+
+                game_state = new_gs
+                step += 1
+
+            goals_for_total += ep_gf
+            goals_against_total += ep_ga
+            if ep_gf > ep_ga:
+                wins += 1
+            elif ep_gf == ep_ga:
+                draws += 1
+            else:
+                losses += 1
+
+        env.close()
+
+        return {
+            'n_episodes': n_episodes,
+            'win_rate': round(wins / n_episodes * 100, 2),
+            'draw_rate': round(draws / n_episodes * 100, 2),
+            'loss_rate': round(losses / n_episodes * 100, 2),
+            'avg_goals_for': round(goals_for_total / n_episodes, 2),
+            'avg_goals_against': round(goals_against_total / n_episodes, 2),
+            'interpretation': (
+                'PASS — expert can beat bot 1.0' if wins / n_episodes > 0.5
+                else 'WARNING — expert cannot beat bot 1.0; RCI ground truth is weak'
+            ),
+        }
+    except ImportError as e:
+        return {
+            'status': 'skipped',
+            'reason': f'Missing dependency: {e}',
+            'note': 'Run inside Docker',
+        }
+
+
+# ===========================================================================
+# 6. NOVELTY SCATTER — RCI vs FAI Independence Check
+# ===========================================================================
+
+def novelty_scatter(
+    per_episode_metrics: Dict[str, List[float]],
+) -> Dict:
+    """Check if RCI measures something distinct from FAI.
+
+    If Pearson r(RCI, FAI) > 0.8 → RCI is likely redundant.
+    If r < 0.5 → RCI captures a different dimension (novelty confirmed).
+    If 0.5 <= r <= 0.8 → partial overlap, RCI adds some unique info.
+
+    Returns correlation data and interpretation.
+    """
+    if not HAS_SCIPY:
+        return {'error': 'scipy not installed'}
+
+    result = {}
+    for rci_key in ['rci_cat', 'rci_strict', 'rci_streak']:
+        for faim_key in ['fai_mean', 'fai']:
+            if rci_key not in per_episode_metrics or faim_key not in per_episode_metrics:
+                continue
+
+            arr_rci = np.array([v for v in per_episode_metrics[rci_key]
+                                if isinstance(v, (int, float)) and not np.isnan(v)])
+            arr_fai = np.array([v for v in per_episode_metrics[faim_key]
+                                if isinstance(v, (int, float)) and not np.isnan(v)])
+            n = min(len(arr_rci), len(arr_fai))
+            if n < 3:
+                continue
+
+            r, p = sp_stats.pearsonr(arr_rci[:n], arr_fai[:n])
+
+            if abs(r) > 0.8:
+                novelty = 'LOW — RCI likely redundant with FAI'
+            elif abs(r) > 0.5:
+                novelty = 'MODERATE — partial overlap, RCI adds some unique info'
+            else:
+                novelty = 'HIGH — RCI captures distinct dimension from FAI'
+
+            result[f'{rci_key}_vs_{faim_key}'] = {
+                'pearson_r': round(float(r), 4),
+                'p_value': round(float(p), 6),
+                'n': n,
+                'novelty': novelty,
+            }
+
+    return result
+
+
+# ===========================================================================
 # ORCHESTRATION
 # ===========================================================================
 
@@ -490,6 +630,27 @@ def run_full_validation(
             )
         else:
             print(f"  {model:<12} {res.get('reason', res.get('status', 'N/A'))}")
+
+    # --- 6. Novelty Scatter (RCI vs FAI) ---
+    print("\n" + "=" * 60)
+    print("  6. NOVELTY SCATTER (RCI vs FAI Independence)")
+    print("=" * 60)
+
+    agg_for_scatter = {}
+    for model in available_models:
+        for metric, values in per_seed_metrics[model].items():
+            if isinstance(values, list) and len(values) > 0:
+                if metric not in agg_for_scatter:
+                    agg_for_scatter[metric] = []
+                agg_for_scatter[metric].extend(values)
+
+    report['novelty_scatter'] = novelty_scatter(agg_for_scatter)
+    print("\n  RCI vs FAI independence check:")
+    for pair, res in report['novelty_scatter'].items():
+        if isinstance(res, dict) and 'pearson_r' in res:
+            print(f"    {pair}: r={res['pearson_r']:.4f}, p={res['p_value']:.4f} → {res['novelty']}")
+        else:
+            print(f"    {pair}: {res}")
 
     return report
 

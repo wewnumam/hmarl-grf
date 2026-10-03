@@ -309,6 +309,25 @@ class ExpertPolicy:
         return _move_toward(player_pos, ball_pos)
 
 
+class ExpertPolicyEval(ExpertPolicy):
+    """Detuned expert policy for RCI evaluation ONLY — never used in training.
+
+    Uses perturbed thresholds to break circularity:
+      - Training reward uses ExpertPolicyAllAgents (d_tackle=0.05, d_safe=0.15, d_shoot=0.30)
+      - RCI evaluation uses this (d_tackle=0.06, d_safe=0.18, d_shoot=0.25)
+
+    This ensures RCI measures generalization to a different reference,
+    not just memorization of the training expert.
+    """
+
+    def __init__(self):
+        super().__init__(
+            d_tackle=0.06,   # +20% from training
+            d_safe=0.18,     # +20% from training
+            d_shoot=0.25,    # -17% from training
+        )
+
+
 class ExpertPolicyAllAgents:
     """Convenience wrapper: get ideal actions for all 11 agents."""
 

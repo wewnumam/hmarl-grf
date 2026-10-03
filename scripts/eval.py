@@ -36,7 +36,7 @@ from hmarl.policy import (
     HierarchicalController, HierarchicalActorCritic,
     SubGoalEmbedding, SUBGOAL_EMBED_DIM,
 )
-from hmarl.expert import ExpertPolicyAllAgents
+from hmarl.expert import ExpertPolicyAllAgents, ExpertPolicyEval
 from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
 from hmarl.metrics import _convex_hull_area_numpy
 from hmarl.metrics import (
@@ -128,7 +128,7 @@ def evaluate_hmarl(
 
     env = create_raw_env(render=render)
     controller = HierarchicalController()
-    expert = ExpertPolicyAllAgents()
+    expert = ExpertPolicyEval()  # Anti-circularity: eval uses detuned expert
 
     all_match_results = []
     all_goals_for = []

@@ -59,7 +59,7 @@ from hmarl.rci import compute_rci
 # PPO Hyperparameters (from thesis Table 9)
 # ---------------------------------------------------------------------------
 LEARNING_RATE = 3e-4
-GAMMA = 0.99          # Discount factor
+GAMMA = 1.0           # Song et al. (2024): gamma=1 most stable for 11v11
 GAE_LAMBDA = 0.95     # GAE lambda
 CLIP_RANGE = 0.2      # PPO clip range
 ENT_COEF = 0.01       # Entropy coefficient (c2)
@@ -80,6 +80,16 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 LOG_DIR = "dumps"
 MODEL_DIR = "checkpoints"
+
+# ---------------------------------------------------------------------------
+# Ablation flags — disable reward components individually
+# Set via environment variables: ENABLE_FAI=0, ENABLE_PPR=0, ENABLE_RCI=0
+# ---------------------------------------------------------------------------
+import os as _os
+ENABLE_FAI = _os.environ.get("ENABLE_FAI", "1") != "0"   # Formation Adherence Index
+ENABLE_PPR = _os.environ.get("ENABLE_PPR", "1") != "0"   # Progressive Pass Ratio
+ENABLE_RCI = _os.environ.get("ENABLE_RCI", "1") != "0"   # Role Coherence Index
+print(f"Ablation: FAI={ENABLE_FAI} | PPR={ENABLE_PPR} | RCI={ENABLE_RCI}")
 
 
 def set_seed(seed: int):
@@ -375,6 +385,9 @@ class HMARLTrainer:
                 pass_tracker=self.pass_tracker,
                 rci_tracker=self.rci_tracker,
                 ball_progression_tracker=self.ball_progression_tracker,
+                enable_fai=ENABLE_FAI,
+                enable_ppr=ENABLE_PPR,
+                enable_rci=ENABLE_RCI,
             )
 
             # Update buffer rewards (per-agent share of team reward)

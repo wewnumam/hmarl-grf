@@ -12,6 +12,7 @@ setup(
         "matplotlib",
         "mplsoccer",
         "stable_baselines3",
+        "gym",
         "gymnasium",
         "optuna",
         "scipy",

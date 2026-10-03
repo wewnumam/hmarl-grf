@@ -26,7 +26,7 @@ from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 OBS_DIM = 115
 HIDDEN_DIM = 256
 ACTION_SPACE_SIZE = 19
-GAMMA = 0.99
+GAMMA = 1.0           # Song et al. (2024): gamma=1 most stable for 11v11
 GAE_LAMBDA = 0.95
 CLIP_RANGE = 0.2
 ENT_COEF = 0.01

@@ -287,24 +287,33 @@ def compute_hierarchical_reward(
     rci_tracker: RCITracker,
     num_agents: int = 11,
     ball_progression_tracker: Optional[BallProgressionTracker] = None,
+    enable_fai: bool = True,
+    enable_ppr: bool = True,
+    enable_rci: bool = True,
 ) -> Tuple[float, Dict[str, float]]:
     """Compute combined hierarchical reward.
 
     R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t) + α_P·progression(t)
 
+    Ablation flags: enable_fai, enable_ppr, enable_rci (default True).
+    Set to False to ablate individual reward components.
+
     Returns:
         total_reward, breakdown_dict
     """
     # FAI (formation adherence)
-    rho_fa = compute_fai(game_state, num_agents)
+    rho_fa = compute_fai(game_state, num_agents) if enable_fai else 0.0
 
     # PPR (progressive pass ratio)
-    ppr = pass_tracker.get_ppr()
+    ppr = pass_tracker.get_ppr() if enable_ppr else 0.0
 
     # RCI per agent
-    rci_tracker.update(actual_actions, ideal_actions)
-    rci_per_agent = rci_tracker.get_rci_per_agent()
-    avg_rci = float(np.mean(rci_per_agent))
+    if enable_rci:
+        rci_tracker.update(actual_actions, ideal_actions)
+        rci_per_agent = rci_tracker.get_rci_per_agent()
+        avg_rci = float(np.mean(rci_per_agent))
+    else:
+        avg_rci = 0.0
 
     # Ball progression (dense signal)
     r_progression = 0.0

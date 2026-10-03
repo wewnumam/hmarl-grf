@@ -1,0 +1,12 @@
+{
+  "env": "academy_pass_and_shoot_with_keeper",
+  "episodes": 10,
+  "avg_reward": 0.0,
+  "total_goals_for": 0,
+  "subgoal_usage": {
+    "dribble": 20,
+    "shoot": 0,
+    "pass": 0
+  },
+  "avg_periods_per_episode": 2.0
+}
