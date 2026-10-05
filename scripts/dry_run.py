@@ -156,9 +156,11 @@ def layer2_components():
         gs['ball_owned_team'] = 1
         s = ctrl.get_macro_strategy(gs)
         assert s == STRATEGY_HIGH_PRESSING
-        # ball owned, back half -> possession
+        # ball owned, back half, no local advantage -> possession
+        # (ball must be >0.2 from every mock player, else the numerical
+        # advantage branch correctly returns COUNTER_ATTACK)
         gs['ball_owned_team'] = 0
-        gs['ball'] = [-0.5, 0.0, 0.0]
+        gs['ball'] = [-0.7, 0.0, 0.0]
         s = ctrl.get_macro_strategy(gs)
         assert s == STRATEGY_POSSESSION
         # ball owned, front half -> counter

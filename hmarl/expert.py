@@ -55,24 +55,29 @@ def _move_toward(from_pos: List[float], to_pos: List[float]) -> int:
     dx = to_pos[0] - from_pos[0]
     dy = to_pos[1] - from_pos[1]
 
-    # Determine primary direction
+    # Determine primary direction (GRF: 'top' action moves -y, 'bottom' +y)
     if abs(dx) > abs(dy) * 1.5:
         return ACT_RIGHT if dx > 0 else ACT_LEFT
     elif abs(dy) > abs(dx) * 1.5:
-        return ACT_TOP if dy > 0 else ACT_BOTTOM
+        return ACT_BOTTOM if dy > 0 else ACT_TOP
     else:
         if dx > 0 and dy > 0:
-            return ACT_TOP_RIGHT
-        elif dx > 0 and dy < 0:
             return ACT_BOTTOM_RIGHT
+        elif dx > 0 and dy < 0:
+            return ACT_TOP_RIGHT
         elif dx < 0 and dy > 0:
-            return ACT_TOP_LEFT
+            return ACT_BOTTOM_LEFT
         else:
             return ACT_BOTTOM_LEFT
 
 
-def _get_best_pass_target(game_state: Dict, player_idx: int) -> Optional[int]:
-    """Find best pass target: open teammate, prioritizing forward positions."""
+def _get_best_pass_target(game_state: Dict, player_idx: int, max_open_dist: float = 0.05) -> Optional[int]:
+    """Find best pass target: open teammate, prioritizing forward positions.
+
+    Args:
+        max_open_dist: max distance to nearest opponent for teammate to be "open".
+            Lower = stricter (default 0.05 for GRF scale).
+    """
     player_pos = get_player_position(game_state, 'left', player_idx)
 
     best_idx = None
@@ -87,7 +92,7 @@ def _get_best_pass_target(game_state: Dict, player_idx: int) -> Optional[int]:
         is_open = True
         for j in range(11):
             opp_pos = get_player_position(game_state, 'right', j)
-            if get_distance(teammate_pos, opp_pos) < 0.08:
+            if get_distance(teammate_pos, opp_pos) < max_open_dist:
                 is_open = False
                 break
 
@@ -106,6 +111,28 @@ def _get_best_pass_target(game_state: Dict, player_idx: int) -> Optional[int]:
     return best_idx
 
 
+def _face_direction(game_state: Dict, player_idx: int, target_pos: List[float]) -> int:
+    """Return movement action to face toward target (GRF pass goes toward facing dir)."""
+    player_pos = get_player_position(game_state, 'left', player_idx)
+    dx = target_pos[0] - player_pos[0]
+    dy = target_pos[1] - player_pos[1]
+
+    # Determine primary direction
+    if abs(dx) > abs(dy) * 1.5:
+        return ACT_RIGHT if dx > 0 else ACT_LEFT
+    elif abs(dy) > abs(dx) * 1.5:
+        return ACT_BOTTOM if dy > 0 else ACT_TOP
+    else:
+        if dx > 0 and dy > 0:
+            return ACT_BOTTOM_RIGHT
+        elif dx > 0 and dy < 0:
+            return ACT_TOP_RIGHT
+        elif dx < 0 and dy > 0:
+            return ACT_BOTTOM_LEFT
+        else:
+            return ACT_TOP_LEFT
+
+
 class ExpertPolicy:
     """Rule-based expert policy for RCI reference.
 
@@ -122,6 +149,9 @@ class ExpertPolicy:
         self.d_tackle = d_tackle
         self.d_safe = d_safe
         self.d_shoot = d_shoot
+        # Track facing state for face-then-pass logic
+        self._facing_target = None  # (player_idx, target_idx) or None
+        self._facing_timestep = 0
 
     def get_ideal_action(
         self,
@@ -181,15 +211,19 @@ class ExpertPolicy:
                 return ACT_SHORT_PASS
             return ACT_HIGH_PASS
 
-        # Ball deep in our zone: rush out to intercept
-        if ball_pos[0] < -0.3 and dist_to_ball < 0.15:
+        # Ball very close: direct save attempt
+        if dist_to_ball < 0.1:
             return _move_toward(player_pos, ball_pos)
 
-        # Stay between ball and goal, tracking ball y
-        goal_x = -1.0
-        target_x = max(ball_pos[0] * 0.1 + goal_x * 0.9, -0.95)
-        target_y = ball_pos[1] * 0.3
-        return _move_toward(player_pos, [target_x, target_y])
+        # Hold the shot line: position between ball and goal center,
+        # 0.06 in front of the goal line, y clamped to reachable range
+        gx, gy = -1.0, 0.0
+        dx = ball_pos[0] - gx
+        dy = ball_pos[1] - gy
+        n = (dx * dx + dy * dy) ** 0.5 or 1.0
+        target = [gx + 0.06 * dx / n, max(-0.2, min(0.2, 0.06 * dy / n))]
+        return _move_toward(player_pos, target)
+
 
     def _defender_action(
         self, game_state: Dict, player_idx: int,
@@ -199,15 +233,58 @@ class ExpertPolicy:
     ) -> int:
         """Defender actions based on sub-goal and conditions."""
         if has_ball:
-            target = _get_best_pass_target(game_state, player_idx)
-            if target is not None:
-                return ACT_SHORT_PASS
-            # Safe to dribble forward if no opponent close
-            if min_opp_dist > self.d_safe:
-                return ACT_DRIBBLE
-            return ACT_LONG_PASS
+            # nearest opponent position for escape direction
+            opp_pos, min_d = None, float('inf')
+            for j in range(11):
+                p = get_player_position(game_state, 'right', j)
+                d = get_distance(player_pos, p)
+                if d < min_d:
+                    min_d, opp_pos = d, p
+
+            # heavy pressure: escape away from opponent, biased forward
+            if min_d < 0.12:
+                esc = [player_pos[0] * 2 - opp_pos[0] + 0.15,
+                       player_pos[1] * 2 - opp_pos[1]]
+                return _move_toward(player_pos, esc)
+
+            # find best pass target (strict open check)
+            pass_target = _get_best_pass_target(game_state, player_idx, max_open_dist=0.03)
+
+            # safe window: face forward first, then pass
+            if min_d < 0.25:
+                # If not facing forward (need to turn), move RIGHT first
+                if self._facing_target != ('def', player_idx, 'pass'):
+                    self._facing_target = ('def', player_idx, 'pass')
+                    self._facing_timestep = 0
+                    return ACT_RIGHT  # face forward
+
+                self._facing_timestep += 1
+                # After facing forward for 1 step, try to pass
+                if self._facing_timestep >= 1:
+                    if pass_target is not None:
+                        return ACT_SHORT_PASS
+                    else:
+                        return _move_toward(player_pos, [player_pos[0] + 0.25, player_pos[1] * 0.5])
+
+                return ACT_RIGHT  # keep facing forward
+
+            # reset facing state when not passing
+            self._facing_target = None
+            self._facing_timestep = 0
+
+            # open space: carry forward
+            return _move_toward(player_pos, [player_pos[0] + 0.3, player_pos[1] * 0.5])
+
+        # reset facing state when not having ball
+        self._facing_target = None
+        self._facing_timestep = 0
 
         if sub_goal in (SUBGOAL_ZONAL_MARKING, SUBGOAL_MAN_MARKING):
+            # Swarm press: every defender closes the ball in own half
+            if ball_pos[0] < 0.1 and dist_to_ball < 0.3:
+                if dist_to_ball < 0.12:
+                    return ACT_SLIDING
+                return _move_toward(player_pos, ball_pos)
             # Position between ball and own goal
             target = [
                 (ball_pos[0] + (-1.0)) / 2.0,  # midpoint
@@ -224,10 +301,9 @@ class ExpertPolicy:
             return _move_toward(player_pos, target)
 
         if sub_goal == SUBGOAL_CLEARANCE:
-            # Clear ball away from danger
-            target = [1.0, 0.0]  # Toward opponent half
-            if dist_to_ball < 0.1:
-                return ACT_LONG_PASS
+            # Close down the ball in defensive zone
+            if dist_to_ball < 0.12:
+                return ACT_SLIDING
             return _move_toward(player_pos, ball_pos)
 
         return _move_toward(player_pos, ball_pos)
@@ -240,12 +316,60 @@ class ExpertPolicy:
     ) -> int:
         """Midfielder actions based on sub-goal and conditions."""
         if has_ball:
-            target = _get_best_pass_target(game_state, player_idx)
-            if target is not None:
-                return ACT_SHORT_PASS
-            if min_opp_dist > self.d_safe:
-                return ACT_DRIBBLE
-            return ACT_HIGH_PASS
+            # nearest opponent position for escape direction
+            opp_pos, min_d = None, float('inf')
+            for j in range(11):
+                p = get_player_position(game_state, 'right', j)
+                d = get_distance(player_pos, p)
+                if d < min_d:
+                    min_d, opp_pos = d, p
+
+            # heavy pressure: escape away from opponent, biased forward
+            if min_d < 0.12:
+                esc = [player_pos[0] * 2 - opp_pos[0] + 0.15,
+                       player_pos[1] * 2 - opp_pos[1]]
+                return _move_toward(player_pos, esc)
+
+            # find best pass target (strict open check)
+            pass_target = _get_best_pass_target(game_state, player_idx, max_open_dist=0.03)
+
+            # through-ball: if CF is making forward run and we're in midfield, use high pass
+            cf_pos = get_player_position(game_state, 'left', 10)  # CF is index 10
+            cf_forward = cf_pos[0] > player_pos[0] + 0.15  # CF ahead by 0.15+
+            in_midfield = player_pos[0] > -0.2  # in opposition half or approaching
+
+            if cf_forward and in_midfield and min_d < 0.35:
+                return ACT_HIGH_PASS  # through-ball to CF
+
+            # safe window: face forward first, then pass
+            if min_d < 0.25:
+                # If not facing forward (need to turn), move RIGHT first
+                # GRF: RIGHT = forward toward opponent goal
+                if self._facing_target != ('mid', player_idx, 'pass'):
+                    self._facing_target = ('mid', player_idx, 'pass')
+                    self._facing_timestep = 0
+                    return ACT_RIGHT  # face forward
+
+                self._facing_timestep += 1
+                # After facing forward for 1 step, try to pass
+                if self._facing_timestep >= 1:
+                    if pass_target is not None:
+                        return ACT_SHORT_PASS
+                    else:
+                        return _move_toward(player_pos, [player_pos[0] + 0.25, player_pos[1] * 0.7])
+
+                return ACT_RIGHT  # keep facing forward
+
+            # reset facing state when not passing
+            self._facing_target = None
+            self._facing_timestep = 0
+
+            # open space: advance toward attack
+            return _move_toward(player_pos, [player_pos[0] + 0.3, player_pos[1]])
+
+        # reset facing state when not having ball
+        self._facing_target = None
+        self._facing_timestep = 0
 
         if sub_goal == SUBGOAL_BUILD_UP:
             # Position to receive and distribute
@@ -254,7 +378,11 @@ class ExpertPolicy:
 
         if sub_goal == SUBGOAL_CLEARANCE:
             if dist_to_ball < 0.1:
-                return ACT_LONG_PASS
+                # Check for open teammate before blind clearance
+                pass_target = _get_best_pass_target(game_state, player_idx, max_open_dist=0.03)
+                if pass_target is not None:
+                    return ACT_SHORT_PASS  # controlled pass
+                return ACT_LONG_PASS  # no open target: desperate clearance
             return _move_toward(player_pos, ball_pos)
 
         if sub_goal == SUBGOAL_WING_ATTACK:
@@ -275,20 +403,58 @@ class ExpertPolicy:
             goal_pos = [1.0, 0.0]
             dist_to_goal = get_distance(player_pos, goal_pos)
 
-            # Shoot if close to goal with reasonable angle
-            if dist_to_goal < self.d_shoot and player_pos[0] > 0.5:
+            # Shoot if in attacking zone with makeable distance
+            if dist_to_goal < max(self.d_shoot, 0.6) and player_pos[0] > 0.5:
                 return ACT_SHOT
             # Also shoot from very close, centered
             if dist_to_goal < 0.15 and abs(player_pos[1]) < 0.1:
                 return ACT_SHOT
 
-            target = _get_best_pass_target(game_state, player_idx)
-            if target is not None:
-                return ACT_SHORT_PASS
+            # nearest opponent position for escape direction
+            opp_pos, min_d = None, float('inf')
+            for j in range(11):
+                p = get_player_position(game_state, 'right', j)
+                d = get_distance(player_pos, p)
+                if d < min_d:
+                    min_d, opp_pos = d, p
 
-            if min_opp_dist > self.d_safe:
-                return ACT_DRIBBLE
-            return ACT_HIGH_PASS
+            # heavy pressure: escape away from opponent, biased forward
+            if min_d < 0.12:
+                esc = [player_pos[0] * 2 - opp_pos[0] + 0.15,
+                       player_pos[1] * 2 - opp_pos[1]]
+                return _move_toward(player_pos, esc)
+
+            # find best pass target (strict open check)
+            pass_target = _get_best_pass_target(game_state, player_idx, max_open_dist=0.03)
+
+            # safe window: face forward first, then pass
+            if min_d < 0.25:
+                # If not facing forward (need to turn), move RIGHT first
+                if self._facing_target != ('att', player_idx, 'pass'):
+                    self._facing_target = ('att', player_idx, 'pass')
+                    self._facing_timestep = 0
+                    return ACT_RIGHT  # face forward
+
+                self._facing_timestep += 1
+                # After facing forward for 1 step, try to pass
+                if self._facing_timestep >= 1:
+                    if pass_target is not None:
+                        return ACT_SHORT_PASS
+                    else:
+                        return _move_toward(player_pos, [player_pos[0] + 0.25, player_pos[1] * 0.7])
+
+                return ACT_RIGHT  # keep facing forward
+
+            # reset facing state when not passing
+            self._facing_target = None
+            self._facing_timestep = 0
+
+            # open space: drive at goal
+            return _move_toward(player_pos, goal_pos)
+
+        # reset facing state when not having ball
+        self._facing_target = None
+        self._facing_timestep = 0
 
         if sub_goal == SUBGOAL_WING_ATTACK:
             if role in (ROLE_LM, ROLE_RM):
@@ -303,6 +469,11 @@ class ExpertPolicy:
             return _move_toward(player_pos, target)
 
         if sub_goal == SUBGOAL_BUILD_UP:
+            # CF: make forward run to receive through-ball
+            if role == ROLE_CF:
+                # Run into space ahead of ball
+                target = [min(ball_pos[0] + 0.4, 0.8), ball_pos[1] * 0.3]
+                return _move_toward(player_pos, target)
             target = [ball_pos[0] + 0.1, ball_pos[1]]
             return _move_toward(player_pos, target)
 

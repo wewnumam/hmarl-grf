@@ -171,36 +171,53 @@ def get_git_hash() -> str:
 # Progress / ETA
 # ---------------------------------------------------------------------------
 class ProgressTracker:
-    """Lightweight progress + ETA display for loops."""
+    """Lightweight progress + ETA display for loops. Uses tqdm if available."""
 
     def __init__(self, total: int, label: str = "Progress",
                  print_every: int = 1):
-        self.total = max(total, 1)
-        self.label = label
-        self.print_every = print_every
-        self.start_time = time.time()
-        self.current = 0
+        try:
+            from tqdm import tqdm
+            self.total = max(total, 1)
+            self.label = label
+            self.pbar = tqdm(total=self.total, desc=label, unit="it",
+                             dynamic_ncols=True, leave=False)
+            self._use_tqdm = True
+        except ImportError:
+            self.total = max(total, 1)
+            self.label = label
+            self.start_time = time.time()
+            self.current = 0
+            self.print_every = print_every
+            self._use_tqdm = False
 
     def update(self, n: int = 1, extra: str = ""):
-        self.current += n
-        if self.current % self.print_every != 0 and self.current != self.total:
-            return
-        elapsed = time.time() - self.start_time
-        rate = self.current / max(elapsed, 0.01)
-        remaining = (self.total - self.current) / max(rate, 0.001)
-        eta_str = self._format_time(remaining)
-        pct = self.current / self.total * 100
-        suffix = f" | {extra}" if extra else ""
-        print(
-            f"\r  {self.label}: {self.current}/{self.total} "
-            f"({pct:.0f}%) | {rate:.1f}/s | ETA: {eta_str}{suffix}   ",
-            end="", flush=True,
-        )
+        if self._use_tqdm:
+            self.pbar.update(n)
+            if extra:
+                self.pbar.set_postfix_str(extra)
+        else:
+            self.current += n
+            if self.current % self.print_every != 0 and self.current != self.total:
+                return
+            elapsed = time.time() - self.start_time
+            rate = self.current / max(elapsed, 0.01)
+            remaining = (self.total - self.current) / max(rate, 0.001)
+            eta_str = self._format_time(remaining)
+            pct = self.current / self.total * 100
+            suffix = f" | {extra}" if extra else ""
+            print(
+                f"\r  {self.label}: {self.current}/{self.total} "
+                f"({pct:.0f}%) | {rate:.1f}/s | ETA: {eta_str}{suffix}   ",
+                end="", flush=True,
+            )
 
     def done(self):
-        elapsed = time.time() - self.start_time
-        print(f"\r  {self.label}: {self.total}/{self.total} "
-              f"(100%) | elapsed: {self._format_time(elapsed)}" + " " * 20)
+        if self._use_tqdm:
+            self.pbar.close()
+        else:
+            elapsed = time.time() - self.start_time
+            print(f"\r  {self.label}: {self.total}/{self.total} "
+                  f"(100%) | elapsed: {self._format_time(elapsed)}" + " " * 20)
 
     @staticmethod
     def _format_time(seconds: float) -> str:

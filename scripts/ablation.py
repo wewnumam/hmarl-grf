@@ -19,6 +19,10 @@ import json
 import os
 import sys
 import time
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 import traceback
 from typing import Dict, List
 

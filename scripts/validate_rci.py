@@ -19,6 +19,10 @@ import json
 import os
 import sys
 import traceback
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -824,7 +828,8 @@ def main():
                 'compactness_mean': [], 'psr': [], 'ppr': [],
                 'win_rate': [],
             }
-            for s in range(args.seeds):
+            pbar = tqdm(range(args.seeds), desc=f"  {alg.upper()} seeds", leave=True) if tqdm else range(args.seeds)
+            for s in pbar:
                 seed = args.base_seed + s
                 try:
                     if alg == 'hmarl':
@@ -859,6 +864,8 @@ def main():
                     traceback.print_exc()
                     print(f"    Seed {s+1} FAILED: {e}")
 
+            if tqdm and hasattr(pbar, 'close'):
+                pbar.close()
             per_seed[alg] = seed_metrics
 
     # Run validation

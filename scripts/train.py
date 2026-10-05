@@ -15,7 +15,11 @@ import os
 import signal
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+from typing import Dict, List, Optional
 
 # Ensure project root is on path so `import hmarl` works
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -46,7 +50,7 @@ from hmarl.policy import (
     STRATEGY_POSSESSION,
 )
 from hmarl.expert import ExpertPolicyAllAgents
-from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
+from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward, CONCEDE_PENALTY
 from hmarl.metrics import (
     compute_win_rate, compute_goal_difference,
     pass_success_ratio, progressive_pass_ratio,
@@ -213,16 +217,30 @@ class HMARLTrainer:
         log_dir: str = LOG_DIR,
         model_dir: str = MODEL_DIR,
         render: bool = False,
+        scenario: str = "11_vs_11_stochastic",
     ):
         self.total_timesteps = total_timesteps
         self.log_dir = log_dir
         self.model_dir = model_dir
         self.render = render
+        self.scenario = scenario
+
+        # Map scenario → env_name + num_agents
+        SCENARIO_MAP = {
+            "11_vs_11_stochastic": {"env": "11_vs_11_stochastic", "agents": 11},
+            "academy_single_goal_versus_lazy": {"env": "academy_single_goal_versus_lazy", "agents": 11},
+            "academy_empty_goal": {"env": "academy_empty_goal", "agents": 1},
+            "academy_3_vs_1_with_keeper": {"env": "academy_3_vs_1_with_keeper", "agents": 3},
+        }
+        cfg = SCENARIO_MAP.get(scenario, SCENARIO_MAP["11_vs_11_stochastic"])
+        self.env_name = cfg["env"]
+        self.num_agents = cfg["agents"]
 
         os.makedirs(model_dir, exist_ok=True)
 
         # Create environment (use raw for full game state access)
-        self.env = create_raw_env(render=render, write_dumps=False)
+        self.env = create_raw_env(env_name=self.env_name, num_agents=self.num_agents,
+                                  render=render, write_dumps=False)
 
         # Hierarchical controller (rule-based high/mid)
         self.controller = HierarchicalController()
@@ -251,7 +269,7 @@ class HMARLTrainer:
 
         # Trackers
         self.pass_tracker = PassTracker()
-        self.rci_tracker = RCITracker(num_agents=NUM_AGENTS)
+        self.rci_tracker = RCITracker(num_agents=self.num_agents)
         self.ball_progression_tracker = BallProgressionTracker()
 
         # Logging
@@ -305,6 +323,8 @@ class HMARLTrainer:
         all_actual_actions = []
         all_ideal_actions = []
         all_game_states = []
+        breakdown_sums = {}  # Accumulate reward breakdown for episode average
+        prev_goals_against = 0  # Track for concede penalty
 
         prev_game_state = None
         done = False
@@ -329,7 +349,7 @@ class HMARLTrainer:
             if training:
                 self.buffer.start_timestep()
 
-            for i in range(NUM_AGENTS):
+            for i in range(self.num_agents):
                 obs_vec = self._get_obs_vector(game_state, i)
                 sg_embed = self._get_subgoal_embed(sub_goals[i])
 
@@ -372,8 +392,22 @@ class HMARLTrainer:
                 done = terminated or truncated
             else:
                 obs_raw, game_reward, done, info = step_result
-            team_reward = float(np.sum(game_reward))
+
+            # Apply game reward modifiers (Opsi A + Lose Penalty)
+            # Sparse reward: only at episode end (win/draw/lose)
+            # Mid-episode: game_reward = 0 (shaping provides dense signal)
+            # Terminal reward applied AFTER episode loop (see below)
+            team_reward = 0.0  # mid-episode: no game reward, shaping only
+
             new_game_state = extract_game_state(obs_raw)
+
+            # Concede penalty: apply when goals_against increases
+            _score_now = new_game_state.get('score', [0, 0])
+            _ga_now = _score_now[1] if isinstance(_score_now, (list, tuple)) else 0
+            if _ga_now > prev_goals_against:
+                _conceded = _ga_now - prev_goals_against
+                team_reward += CONCEDE_PENALTY * _conceded
+                prev_goals_against = _ga_now
 
             # ---- Tahap 4: Compute combined reward ----
             self.pass_tracker.update(new_game_state, prev_game_state)
@@ -392,7 +426,7 @@ class HMARLTrainer:
 
             # Update buffer rewards (per-agent share of team reward)
             if training:
-                self.buffer.fill_timestep_reward(total_reward / NUM_AGENTS)
+                self.buffer.fill_timestep_reward(total_reward / self.num_agents)
                 # Mark done for all agents in this timestep if episode ended
                 if done:
                     for idx in self.buffer.agent_buffer_indices:
@@ -403,12 +437,34 @@ class HMARLTrainer:
             episode_steps += 1
             self.global_step += 1
 
+            # Accumulate reward breakdown
+            for k, v in reward_breakdown.items():
+                breakdown_sums[k] = breakdown_sums.get(k, 0.0) + float(v)
+
             all_actual_actions.append(joint_actions)
             all_ideal_actions.append(ideal_actions)
             all_game_states.append(new_game_state)
 
             prev_game_state = game_state
             game_state = new_game_state
+
+        # ---- Terminal Reward (after episode loop) ----
+        # GRF doesn't always set done=True at step 3000
+        # Apply terminal reward based on final score
+        from hmarl.reward import GAME_WIN, GAME_DRAW, GAME_LOSE
+        _final_score = game_state.get('score', [0, 0])
+        _gf = _final_score[0] if isinstance(_final_score, (list, tuple)) else 0
+        _ga = _final_score[1] if isinstance(_final_score, (list, tuple)) else 0
+        if _gf > _ga:
+            terminal_reward = GAME_WIN
+        elif _gf < _ga:
+            terminal_reward = GAME_LOSE
+        else:
+            terminal_reward = GAME_DRAW
+
+        # Apply terminal reward to episode total and breakdown
+        episode_reward += terminal_reward
+        breakdown_sums['game_reward'] = breakdown_sums.get('game_reward', 0.0) + terminal_reward
 
         # ---- PPO Update ----
         if training and len(self.buffer.observations) > 0:
@@ -427,6 +483,10 @@ class HMARLTrainer:
         score_left = game_state.get('score', [0, 0])[0] if isinstance(game_state.get('score'), (list, tuple)) else 0
         score_right = game_state.get('score', [0, 0])[1] if isinstance(game_state.get('score'), (list, tuple)) else 0
 
+        # Compute episode averages for breakdown
+        ep_steps = max(episode_steps, 1)
+        breakdown_avg = {k: v / ep_steps for k, v in breakdown_sums.items()}
+
         return {
             'episode_reward': episode_reward,
             'episode_length': episode_steps,
@@ -436,7 +496,9 @@ class HMARLTrainer:
             'all_ideal_actions': all_ideal_actions,
             'all_game_states': all_game_states,
             'reward_breakdown': reward_breakdown,
+            'reward_breakdown_avg': breakdown_avg,
             'ball_progression_total': self.ball_progression_tracker.total_progression,
+            'pass_stats': self.pass_tracker.get_stats(),
         }
 
     def _ppo_update(self):
@@ -515,6 +577,16 @@ class HMARLTrainer:
             'episode_goals_against': [],
             'episode_ball_progression': [],
             'episode_action_distribution': [],  # [counts per action] per episode
+            # PPR diagnostics
+            'episode_pass_attempts': [],
+            'episode_pass_successful': [],
+            'episode_pass_progressive': [],
+            # Reward breakdown (per-step average)
+            'episode_r_game': [],
+            'episode_r_high': [],
+            'episode_r_mid': [],
+            'episode_r_low': [],
+            'episode_r_progression': [],
         }
 
     def _append_training_log(self, stats: Dict):
@@ -558,6 +630,20 @@ class HMARLTrainer:
         ball_prog = stats.get('ball_progression_total', 0.0)
         self._train_log['episode_ball_progression'].append(float(ball_prog))
 
+        # PPR diagnostics from PassTracker
+        pass_stats = stats.get('pass_stats', {})
+        self._train_log['episode_pass_attempts'].append(int(pass_stats.get('attempts', 0)))
+        self._train_log['episode_pass_successful'].append(int(pass_stats.get('successful', 0)))
+        self._train_log['episode_pass_progressive'].append(int(pass_stats.get('progressive', 0)))
+
+        # Reward breakdown (per-step average)
+        rb_avg = stats.get('reward_breakdown_avg', {})
+        self._train_log['episode_r_game'].append(float(rb_avg.get('game_reward', 0.0)))
+        self._train_log['episode_r_high'].append(float(rb_avg.get('r_high', 0.0)))
+        self._train_log['episode_r_mid'].append(float(rb_avg.get('r_mid', 0.0)))
+        self._train_log['episode_r_low'].append(float(rb_avg.get('r_low', 0.0)))
+        self._train_log['episode_r_progression'].append(float(rb_avg.get('r_progression', 0.0)))
+
         # Action distribution: count of each action across all agents in episode
         all_actions = stats.get('all_actual_actions', [])
         action_counts = [0] * 19
@@ -594,6 +680,7 @@ class HMARLTrainer:
         episode_rewards = []
         self._init_training_log()
 
+        pbar = tqdm(total=self.total_timesteps, desc="Training", unit="step", dynamic_ncols=True) if tqdm else None
         while self.global_step < self.total_timesteps:
             # --- Selective dump: recreate env with dumps at interval ---
             dump_this_episode = (
@@ -615,6 +702,14 @@ class HMARLTrainer:
 
             episode_rewards.append(stats['episode_reward'])
             self._append_training_log(stats)
+            if pbar:
+                pbar.update(stats['episode_length'])
+                pbar.set_postfix({
+                    'Ep': self.episode_count,
+                    'R': f"{stats['episode_reward']:.0f}",
+                    'GF': stats['score_left'],
+                    'GA': stats['score_right'],
+                })
 
             # Logging
             if self.episode_count % LOG_FREQ == 0 and self.episode_count > 0:
@@ -682,6 +777,8 @@ class HMARLTrainer:
         self._save_checkpoint()
         self._save_training_log()
         self.writer.close()
+        if pbar:
+            pbar.close()
         print(f"\nTraining complete. Total time: {time.time() - start_time:.1f}s")
 
     def run_episode(self, training: bool = True) -> Dict:
@@ -774,7 +871,7 @@ class HMARLTrainer:
                 sub_goals = controller.get_sub_goals(game_state, macro)
 
                 joint_actions = []
-                for i in range(NUM_AGENTS):
+                for i in range(self.num_agents):
                     obs_vec = self._get_obs_vector(game_state, i)
                     with torch.no_grad():
                         sg_embed = self.subgoal_embedding(
@@ -834,6 +931,8 @@ if __name__ == "__main__":
                         help="Random seed for reproducibility")
     parser.add_argument("--dump-freq", type=int, default=DUMP_FREQ,
                         help="Enable dump every N episodes (0=never)")
+    parser.add_argument("--scenario", type=str, default="11_vs_11_stochastic",
+                        help="GRF scenario: 11_vs_11_stochastic, academy_single_goal_versus_lazy, academy_empty_goal")
     parser.add_argument("--max-dumps", type=int, default=MAX_DUMPS,
                         help="Max dump files to keep")
 
@@ -848,6 +947,7 @@ if __name__ == "__main__":
         log_dir=args.log_dir,
         model_dir=args.model_dir,
         render=args.render,
+        scenario=args.scenario,
     )
 
     if args.resume:

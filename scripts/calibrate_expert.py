@@ -53,7 +53,7 @@ def collect_distance_distributions(
       - sliding_eligible_dist: distances where sliding is a reasonable action
     """
     set_seed(seed)
-    env = create_raw_env(render=False)
+    env = create_raw_env(env_name=scenario, render=False)
     controller = HierarchicalController()
 
     min_opp_dist_all = []
@@ -204,6 +204,7 @@ def validate_thresholds(
     proposed: Dict,
     n_episodes: int = 50,
     seed: int = 42,
+    scenario: str = "11_vs_11_stochastic",
 ) -> Dict:
     """Validate proposed thresholds by running expert policy and measuring win rate.
 
@@ -230,7 +231,7 @@ def validate_thresholds(
 
         for name, thresholds in threshold_sets.items():
             _set_seed(seed)
-            env = create_raw_env(render=False)
+            env = create_raw_env(env_name=scenario, render=False)
             controller = HierarchicalController()
             expert = ExpertPolicy(
                 d_tackle=thresholds['d_tackle'],
@@ -357,6 +358,7 @@ def main():
         analysis['proposed_thresholds'],
         n_episodes=args.validate_episodes,
         seed=args.seed,
+        scenario=args.scenario,
     )
 
     print("\n  Validation results:")

@@ -24,10 +24,14 @@ hmarl-grf/
 │   ├── train.py                  # HMARL training + checkpoint + mid-train eval
 │   ├── eval.py                   # HMARL evaluation + visualization
 │   ├── dry_run.py                # Dry run / smoke test (3-layer validation)
+│   ├── calibrate_expert.py       # Expert threshold calibration (d_tackle, d_safe, d_shoot)
+│   ├── diagnose_expert.py        # Expert policy behavioral diagnostic (action dist, passes, shots)
+│   ├── probe4_windows.py         # Debug probe: possession-window action trace
 │   ├── sweep.py                  # Optuna hyperparameter sweep
 │   ├── stat_test.py              # Multi-seed statistical significance testing
 │   ├── validate_rci.py              # RCI validity evaluation (construct, discrimination, consistency)
-│   └── ablation.py               # Ablation study (component contributions)
+│   ├── ablation.py               # Ablation study (component contributions)
+│   └── train_academy.py          # Simplified PPO for academy scenarios (no HMARL)
 ├── evaluation/
 │   ├── baselines/                # Stable Baselines3 baselines
 │   │   ├── 11v11_a2c.py
@@ -133,6 +137,7 @@ Scripts categorized by whether they're required for thesis results. **Run Tier 1
 | Tier | Script | Purpose | Research Problem | Skip? |
 |------|--------|---------|-----------------|-------|
 | **0** | `dry_run.py --full` | Smoke test: syntax, imports, GRF env, PPO backward | — | 5 min, do once before any training |
+| **0** | `diagnose_expert.py` | Expert behavioral diagnostic: action dist, pass rate, shots, heatmap | Understand WHY expert is not competitive | 5 min, run before fixing expert |
 | **1** | `train.py` | Train HMARL (3M timesteps → checkpoint) | Foundation for all eval | No — produces `hmarl_model.pt` |
 | **1** | `hmarl.ippo` / `hmarl.shppo` / `hmarl.mappo` | Train flat baselines | Need trained baselines for comparison | No — produces `*_model.pt` |
 | **2** | `eval.py` | Full metrics + 16 plot types | All coordination + performance results | No |
@@ -148,6 +153,9 @@ Scripts categorized by whether they're required for thesis results. **Run Tier 1
 # 1. Verify environment
 docker compose up -d && docker exec -it gfootball-dev bash
 python scripts/dry_run.py --full
+
+# 1b. Diagnose expert policy (understand why it loses)
+python scripts/diagnose_expert.py --episodes 5
 
 # 2. Train (HMARL + baselines) — several days on GTX 1650
 python scripts/train.py --timesteps 3000000
@@ -179,6 +187,7 @@ python scripts/validate_rci.py --seeds 3 --timesteps 3000000 --eval-episodes 100
 |--------|:-----:|:---:|:------:|:------:|:------:|:---:|:-------:|
 | `scripts/train.py` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `scripts/eval.py` | ✅ | ✅ | ✅ | — | — | — | ✅ |
+| `scripts/diagnose_expert.py` | ✅ | ✅ | ✅ | ✅ | — | — | — |
 | `scripts/sweep.py` | ✅ | — | — | — | — | — | — |
 | `scripts/stat_test.py` | ✅ | — | — | — | — | — | ✅ |
 | `scripts/validate_rci.py` | ✅ | — | — | — | — | — | — |
@@ -238,9 +247,84 @@ Combined reward: `R_t = r_game + α_H·FAI + α_M·PPR + (α_L/N)·Σ RCI_i + α
 
 **Reward shaping difference (intentional):** HMARL uses hierarchical reward shaping (FAI, PPR, RCI, Ball Progression) while baselines use game reward only. This is a deliberate design choice: baselines represent standard flat RL without domain-specific reward engineering. HMARL's improvement over baselines is attributed to the combination of hierarchical architecture AND reward shaping. The ablation study (`scripts/ablation.py`) isolates each component's contribution.
 
+## Expert Policy (Rule-Based Oracle)
+
+`hmarl/expert.py` — role-based action selection used for reward shaping (RCI term) and RCI evaluation. Three levels: GK distribution logic, defender/midfielder/attacker branches per sub-goal.
+
+**Ball-carrier decision ladder (fixed 2026-10-03):** the original implementation always returned `short_pass` for any carrier (pass-target check always found a teammate), producing pass-into-tackle turnover loops. Current logic:
+
+1. Attacker in shooting range (`x > 0.5`, `dist_to_goal < max(d_shoot, 0.6)`) → shot
+2. Heavy pressure (`min_opp_dist < 0.12`) → escape movement away from opponent, forward-biased
+3. Safe window (`min_opp_dist < 0.25`) → short pass
+4. Open space → advance toward attack
+
+**Defensive logic:** defenders swarm-press the ball in own half (slide when `dist < 0.12`); clearance sub-goal closes down the ball directly. GK holds the shot line between ball and goal center, `0.06` in front of the goal line, and only leaves it for direct saves (`dist < 0.1`).
+
+**Critical bug fixed (2026-10-03):** `_move_toward` had y-axis inverted — GRF `top` action moves **−y**, code mapped `dy > 0 → top`. Every diagonal/y movement in the expert was mirrored: defenders chased the wrong way, GK drifted off the line, escape vectors pointed backwards. This was the root cause of conceding 18–21 goals per episode before the fix.
+
+**Status (10 episodes, `11_vs_11_stochastic`, seed 42, 3000 steps, CPU):** W/D/L = 0/0/10, WR 0%, GF/ep 0.2, GA/ep 5.5. Defense is workable after the y-fix (down from ~19 GA/ep); attack still cannot score consistently — known limitation, not yet addressed. The expert functions as a rule-based RCI oracle (role-consistent reference actions), not as a competitive player.
+
+**Calibration (`scripts/calibrate_expert.py`):** collects per-timestep distance distributions and proposes thresholds as percentiles. Latest run (20 episodes): `d_tackle=0.5077` (p90 sliding-eligible), `d_safe=0.0700` (p10 space radius), `d_shoot=0.9969` (p10 goal distance). Note `--scenario` flag now actually reaches the env (previously ignored — always ran `11_vs_11_stochastic`); only 11v11 scenarios are supported since the policy stack hardcodes 11 agents.
+
+**Important:** The calibrated thresholds differ substantially from the hardcoded heuristics used in the thesis (`d_tackle=0.05`, `d_safe=0.15`, `d_shoot=0.30`). The calibrated values suggest that distance distributions in 11v11 stochastic scenarios have different characteristics than assumed. The hardcoded heuristics are retained for consistency with the thesis design, and sensitivity analysis is used to evaluate robustness to threshold variations. See `scripts/calibrate_expert.py` for the full calibration pipeline.
+
+**Diagnostic (`scripts/diagnose_expert.py`):** runs expert policy against GRF bot and collects detailed behavioral data: action distribution per role, ball possession time, pass attempts/completions, shots on target, conceded positions, ball heatmap (3×3 grid), and strategy/sub-goal activation frequency. Run this before attempting to fix expert policy — it reveals WHERE the expert fails (e.g., "attack never enters attacking third", "passes completion rate < 5%", "CF rarely receives ball").
+
+```bash
+python scripts/diagnose_expert.py --episodes 5 --output evaluation_results/expert_diagnostics.json
+```
+
+## Known Issues & Root Cause Analysis (2026-10-04)
+
+### Issue 1: Expert Policy Not Competitive (WR 0%)
+
+**Symptom:** Expert policy achieves W/D/L = 0/0/10 against GRF bot difficulty 1.0. GF/ep = 0.2, GA/ep = 5.5.
+
+**Root cause:** Expert policy implements *positioning rules* (defenders between ball and goal, GK on shot line, midfielders adjusting to ball position) but lacks *scoring mechanisms*: no through-balls, no off-the-ball runs, no combination play. Positioning ≠ goal scoring.
+
+**Impact on thesis:** RCI measures conformity to a non-competitive reference. The ground-truth validity check (BAB_4: expert must achieve WR > 50%) fails.
+
+**Mitigation:** Run `diagnose_expert.py` to identify specific failure points before attempting to fix attack logic.
+
+### Issue 2: PPR Always 0 or 100
+
+**Symptom:** `episode_ppr` in training log shows 0.0 for most episodes, with occasional 100.0 spikes.
+
+**Root cause:** Team rarely completes passes (WR 0% = constant possession loss). When `successful_passes ≈ 0`, PPR = 0/0 = 0. When 1 pass succeeds and it happens to be progressive, PPR = 100.
+
+**Fix applied (2026-10-04):** `PassTracker._pass_start_pos` bug fixed in `hmarl/reward.py`. Previously, when ball went loose (`ball_owned_player = -1`) and was recovered by a teammate, `_pass_start_pos` was set to the receiver's position (not the previous possessor's), causing progressive check to compare a player's position against itself → always non-progressive. Now `_pass_start_pos` correctly tracks the pass initiator's position.
+
+**Diagnostics added:** Training log now records `episode_pass_attempts`, `episode_pass_successful`, `episode_pass_progressive` to distinguish computational bugs from behavioral failures.
+
+### Issue 3: RCI_strict ≈ Random (0.05 ≈ 1/19)
+
+**Symptom:** `episode_rci_strict` hovers around 0.04–0.06, statistically indistinguishable from random (1/19 ≈ 0.053 for 19 discrete actions).
+
+**Root cause:** Reward shaping uses `f_cat` (category match), not `f_strict`. No gradient signal for exact action matching. RCI contribution per agent: 0.05 × 0.47 / 11 ≈ 0.0022/step — negligible compared to entropy coefficient (0.01) and FAI contribution (0.083/step).
+
+**Implication:** RCI_strict cannot be used as evidence that agents learn exact expert actions. RCI_cat (~0.47) is the meaningful metric, but it's inflated by movement category dominance (8 of 19 actions = movement).
+
+### Issue 4: Reward Dominated by Shaping (~99%)
+
+**Symptom:** Episode rewards range 160–570. Game reward (goals ±1) contributes ~2–4. Shaping (FAI + RCI + prog) contributes ~350–380.
+
+**Root cause:** α_H·FAI × T = 0.1 × 0.83 × 3000 ≈ 249. α_L·RCI × T = 0.05 × 0.47 × 3000 ≈ 71. α_P·prog × T ≈ 45. Game reward: ±2–4.
+
+**Implication:** Agent learns to maximize shaping reward (positioning + category match) while ignoring game reward (winning). This creates a local optimum: "coherent but non-competitive." FAI = 0.83 from episode 1 (rule-based positioning), RCI_cat = 0.47 (moderate category match), WR = 0% (no goals).
+
+### Issue 5: Calibration Mismatch
+
+**Symptom:** Hardcoded thresholds (0.05/0.15/0.30) differ substantially from calibrated values (0.51/0.07/1.00).
+
+**Root cause:** Distance distributions in 11v11 stochastic scenarios differ from manual assumptions. Calibrated `d_shoot = 1.00` (p10 goal distance) suggests ball carriers are rarely close to goal; `d_tackle = 0.51` (p90 sliding-eligible) suggests defenders engage opponents at larger distances than assumed.
+
+**Mitigation:** Hardcoded heuristics retained for thesis consistency. Sensitivity analysis (±20% variation) evaluates robustness. Calibrated values reported as input for sensitivity analysis.
+
 ## Environment
 
 Google Research Football (`11_vs_11_stochastic`), 11 controlled agents, 19 discrete actions.
+
+**Academy scenarios** (simplified, for ablation/debugging): `academy_single_goal_versus_lazy` (4 agents), `academy_empty_goal` (4), `academy_run_to_score` (1), `academy_run_to_score_with_keeper` (1), `academy_3_vs_1_with_keeper` (3). Use `train_academy.py` for these — the full HMARL pipeline (FAI/RCI/expert) is designed for 11v11 only.
 
 Two observation modes:
 - `raw` — dict per agent (used by HMARL, IPPO, SHPPO, MAPPO for full state access)
@@ -339,7 +423,36 @@ python scripts/train.py --dump-freq 0
 
 **Mid-training evaluation:** Automatically runs 10-episode evaluation every 500 episodes, logging win rate, avg reward, and goal difference to TensorBoard.
 
-**Training log:** Per-episode metrics saved to `dumps/training_log.json` (rewards, RCI, FAI, PPR, compactness, ball progression, action distribution).
+**Training log:** Per-episode metrics saved to `dumps/training_log.json` (rewards, RCI, FAI, PPR, compactness, ball progression, action distribution, pass diagnostics).
+
+**PPR diagnostics (added 2026-10-04):** Training log now includes per-episode pass tracking: `episode_pass_attempts`, `episode_pass_successful`, `episode_pass_progressive`. These diagnostics reveal whether PPR = 0 is caused by computation bugs or by the team genuinely failing to complete passes. If `pass_successful` ≈ 0 across episodes, the issue is behavioral (agents can't pass), not computational.
+
+**Scenario support (added 2026-10-05):** `train.py` now accepts `--scenario` to run on different GRF scenarios (e.g., `academy_single_goal_versus_lazy`). The trainer auto-adjusts `num_agents` and env name. Note: FAI/RCI/expert are designed for 11v11 — academy scenarios may produce meaningless shaping values.
+
+### Academy Scenarios (Simplified PPO)
+
+`scripts/train_academy.py` — stripped-down PPO trainer **without** HMARL hierarchy (no FAI, RCI, PPR, expert, or hierarchical controller). Pure game reward + configurable goal bonus. Purpose: test whether the PPO network can learn to score goals at all in easy scenarios.
+
+```bash
+# Test scoring ability on lazy defenders (4 agents)
+python scripts/train_academy.py --scenario academy_single_goal_versus_lazy --timesteps 100000
+
+# Empty goal (easiest — no keeper)
+python scripts/train_academy.py --scenario academy_empty_goal --timesteps 50000
+
+# Single agent scoring scenarios
+python scripts/train_academy.py --scenario academy_run_to_score --timesteps 50000
+python scripts/train_academy.py --scenario academy_run_to_score_with_keeper --timesteps 100000
+
+# Custom goal bonus and output directory
+python scripts/train_academy.py --scenario academy_3_vs_1_with_keeper \
+    --timesteps 200000 --goal-bonus 20.0 --log-dir dumps_3v1
+```
+
+**Interpretation:**
+- GF > 0 and increasing → PPO can score; HMARL shaping is the bottleneck
+- GF = 0 throughout → PPO hyperparams or obs encoding is broken
+- Training log saved to `<log-dir>/training_log.json`, model to `<log-dir>/academy_model.pt`
 
 ## TensorBoard Monitoring
 
@@ -783,6 +896,18 @@ This metadata is displayed by `eval.py` when loading a checkpoint and stored in 
 --model-dir PATH    Checkpoint directory (default: checkpoints)
 --dump-freq INT     Enable dump every N episodes (default: 500, 0=never)
 --max-dumps INT     Max dump files to keep (default: 10)
+--scenario STR      GRF scenario (default: 11_vs_11_stochastic)
+```
+
+### train_academy.py
+
+```
+--scenario STR      GRF academy scenario (default: academy_single_goal_versus_lazy)
+--timesteps INT     Total training timesteps (default: 100,000)
+--log-dir PATH      Log/output directory (default: dumps_academy)
+--seed INT          Random seed (default: 42)
+--render            Render during training
+--goal-bonus FLOAT  Extra reward per goal scored (default: 10.0)
 ```
 
 ### eval.py

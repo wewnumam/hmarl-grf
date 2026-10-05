@@ -17,6 +17,10 @@ import os
 import traceback
 import sys
 import time
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 from typing import Dict, List, Optional
 
 # Ensure project root is on path so `import hmarl` works

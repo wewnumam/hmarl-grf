@@ -26,12 +26,21 @@ from hmarl.policy import (
     HighLevelPolicy, MidLevelPolicy, NUM_SUBGOALS,
 )
 
-# Reward coefficients (from thesis, scaled up from 0.01 to be meaningful)
-# Original 0.01 produced ~0.01 total shaping per step vs -5 to -10 game penalty
-ALPHA_HIGH = 0.1    # FAI contribution
-ALPHA_MID = 0.1     # PPR contribution
-ALPHA_LOW = 0.05    # RCI contribution
-ALPHA_PROG = 0.2    # Ball progression dense reward
+# Reward coefficients (Opsi A + Lose Penalty, 2026-10-05)
+# Tuned to reduce shaping dominance: shaping was ~99% of total reward
+# New balance: shaping ~62%, game reward ~33% per episode
+ALPHA_HIGH = 0.05    # FAI contribution (was 0.1)
+ALPHA_MID = 0.05     # PPR contribution (was 0.1)
+ALPHA_LOW = 0.02     # RCI contribution (was 0.05)
+ALPHA_PROG = 0.1     # Ball progression dense reward (was 0.2)
+
+# Game reward modifiers (scale from +1/-1 to meaningful values)
+GAME_WIN = +10.0
+GAME_DRAW = 0.0
+GAME_LOSE = -15.0
+
+# Concede penalty: per goal against during episode
+CONCEDE_PENALTY = -2.0
 
 # Maximum possible deviation (diagonal of the pitch)
 D_MAX = 2.24  # sqrt(2^2 + 1.2^2) ≈ 2.33, use 2.24 as practical max
@@ -177,6 +186,8 @@ class PassTracker:
         self._last_possessor_pos = None
         self._pass_initiated = False
         self._pass_start_pos = None
+        self._prev_owned_team = -1
+        self._prev_owned_player = -1
 
     def update(self, game_state: Dict, prev_game_state: Dict = None):
         """Update pass tracking with current game state.
@@ -197,7 +208,7 @@ class PassTracker:
                 self.pass_attempts += 1
                 self.successful_passes += 1
 
-                # Check if progressive
+                # Check if progressive using pass initiator position
                 if self._pass_start_pos is not None:
                     start_x = self._pass_start_pos[0]
                     end_pos = get_player_position(game_state, 'left', ball_owned_player)
@@ -205,15 +216,33 @@ class PassTracker:
                         self.progressive_passes += 1
 
             elif prev_team == 0 and ball_owned_team != 0:
-                # Pass failed (lost possession)
+                # Pass failed (lost possession) — reset pass tracking
                 self.pass_attempts += 1
+                self._pass_start_pos = None
+                self._last_possessor = -1
+
+            elif prev_team == 0 and ball_owned_team == 0 and prev_player == ball_owned_player:
+                # Same possessor, no pass — just update position
+                pass
+            elif ball_owned_team != 0 or ball_owned_player < 0:
+                # Loose ball or opponent possession — reset
+                self._pass_start_pos = None
+                self._last_possessor = -1
 
         # Track pass initiation position
         if ball_owned_team == 0 and ball_owned_player >= 0:
             if self._last_possessor != ball_owned_player:
-                self._pass_start_pos = get_player_position(game_state, 'left', ball_owned_player)
+                # New possessor: set pass start to PREVIOUS possessor's position
+                if self._last_possessor >= 0 and self._last_possessor_pos is not None:
+                    self._pass_start_pos = self._last_possessor_pos
+                else:
+                    self._pass_start_pos = get_player_position(game_state, 'left', ball_owned_player)
             self._last_possessor = ball_owned_player
             self._last_possessor_pos = get_player_position(game_state, 'left', ball_owned_player)
+        elif ball_owned_team != 0 or ball_owned_player < 0:
+            self._last_possessor = -1
+            self._last_possessor_pos = None
+            self._pass_start_pos = None
 
     def get_ppr(self) -> float:
         """Get current Progressive Pass Ratio."""
@@ -227,6 +256,7 @@ class PassTracker:
             'attempts': self.pass_attempts,
             'successful': self.successful_passes,
             'progressive': self.progressive_passes,
+            'ppr': self.get_ppr(),
         }
 
 
