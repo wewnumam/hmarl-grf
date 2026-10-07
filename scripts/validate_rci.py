@@ -287,7 +287,7 @@ def sensitivity_analysis(
         from hmarl.expert import ExpertPolicyAllAgents, ExpertPolicy, D_TACKLE, D_SAFE, D_SHOOT
         from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
         from hmarl.rci import compute_rci
-        from hmarl.utils import set_seed, extract_obs_vector, HIDDEN_DIM, HEAD_DIM, OBS_DIM, EPISODE_MAX_STEPS
+        from hmarl.utils import set_seed, extract_obs_vector, HIDDEN_DIM, HEAD_DIM, OBS_DIM, EPISODE_MAX_STEPS, load_ckpt
 
         DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -305,7 +305,7 @@ def sensitivity_analysis(
             hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
         ).to(DEVICE)
         subgoal_emb = SubGoalEmbedding().to(DEVICE)
-        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        ckpt = load_ckpt(ckpt_path, map_location='cpu')
         policy.load_state_dict(ckpt['policy_state'])
         subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
         policy.eval()
@@ -584,8 +584,10 @@ def run_full_validation(
                 f"{'Y' if res['significant'] else 'N':>5} "
                 f"{res['expected_direction']:>6}  {res['interpretation']}"
             )
-        else:
+        elif isinstance(res, dict):
             print(f"  {pair:<35} {res.get('reason', res.get('status', 'N/A'))}")
+        else:
+            print(f"  {pair:<35} {res}")
 
     # --- 2. Discrimination Validity ---
     print("\n" + "=" * 60)
@@ -603,13 +605,14 @@ def run_full_validation(
                 test_result = discrimination_validity(hmarl_rci, baseline_rci, model)
                 report['discrimination_validity'][f'hmarl_vs_{model}'] = test_result
                 print(f"\n  HMARL vs {model.upper()}:")
-                print(f"    HMARL:  {test_result['hmarl_mean']:.4f} ± {test_result['hmarl_std']:.4f} (n={test_result['n_hmarl']})")
-                print(f"    {model:8s}: {test_result['baseline_mean']:.4f} ± {test_result['baseline_std']:.4f} (n={test_result['n_baseline']})")
+                if 'hmarl_mean' in test_result:
+                    print(f"    HMARL:  {test_result['hmarl_mean']:.4f} ± {test_result['hmarl_std']:.4f} (n={test_result['n_hmarl']})")
+                    print(f"    {model:8s}: {test_result['baseline_mean']:.4f} ± {test_result['baseline_std']:.4f} (n={test_result['n_baseline']})")
                 if 't_statistic' in test_result:
                     print(f"    t={test_result['t_statistic']:.4f}, p={test_result['p_value_one_sided']:.6f}")
                     print(f"    → {test_result['interpretation']}")
                 else:
-                    print(f"    Skipped: {test_result.get('reason', test_result.get('status', 'unknown'))}")
+                    print(f"    Skipped: {test_result.get('reason', test_result.get('error', test_result.get('status', 'unknown')))}")
 
     # --- 3. Internal Consistency ---
     print("\n" + "=" * 60)
@@ -672,7 +675,7 @@ def run_sensitivity_from_checkpoint(model_path: str, output_path: str, n_episode
         from hmarl.expert import ExpertPolicyAllAgents
         from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
         from hmarl.rci import compute_rci
-        from hmarl.utils import set_seed, extract_obs_vector
+        from hmarl.utils import set_seed, extract_obs_vector, load_ckpt
 
         HIDDEN_DIM, HEAD_DIM, OBS_DIM = 256, 128, 115
         EPISODE_MAX_STEPS = 3000
@@ -684,7 +687,7 @@ def run_sensitivity_from_checkpoint(model_path: str, output_path: str, n_episode
             hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
         ).to(DEVICE)
         subgoal_emb = SubGoalEmbedding().to(DEVICE)
-        ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
+        ckpt = load_ckpt(model_path, map_location='cpu')
         policy.load_state_dict(ckpt['policy_state'])
         subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
         policy.eval()
@@ -779,7 +782,8 @@ def main():
                         help="Quick mode: fewer steps/episodes")
     args = parser.parse_args()
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    if os.path.dirname(args.output):
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     if args.quick:
         args.timesteps = 100_000
@@ -841,10 +845,10 @@ def main():
                     elif alg == 'random':
                         metrics = evaluate_random(args.eval_episodes, seed)
                     else:
-                        train_flat(alg, args.timesteps, seed,
-                                   f"valid_temp/{alg}_{s}")
+                        ckpt = train_flat(alg, args.timesteps, seed,
+                                          f"valid_temp/{alg}_{s}")
                         metrics = evaluate_flat(alg, args.eval_episodes,
-                                               seed + 1000)
+                                               seed + 1000, model_path=ckpt)
 
                     for key in seed_metrics:
                         if key in metrics:

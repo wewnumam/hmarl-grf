@@ -111,7 +111,7 @@ def load_hmarl_checkpoint(
     ).to(dev)
     subgoal_emb = SubGoalEmbedding().to(dev)
 
-    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    ckpt = load_ckpt(ckpt_path, map_location='cpu')
     policy.load_state_dict(ckpt['policy_state'])
     subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
     policy.eval()
@@ -121,6 +121,15 @@ def load_hmarl_checkpoint(
                 if k not in ('policy_state', 'subgoal_embedding_state', 'optimizer_state')}
 
     return policy, subgoal_emb, metadata
+
+
+def load_ckpt(ckpt_path: str, map_location='cpu'):
+    """torch.load wrapper compatible with torch <1.13 (no weights_only kwarg)."""
+    import torch
+    try:
+        return torch.load(ckpt_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(ckpt_path, map_location=map_location)
 
 
 def save_checkpoint(

@@ -28,7 +28,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from hmarl.utils import set_seed as _set_seed_util, extract_obs_vector as _extract_obs_util, save_checkpoint as _save_ckpt
+from hmarl.utils import set_seed as _set_seed_util, extract_obs_vector as _extract_obs_util, save_checkpoint as _save_ckpt, load_ckpt as _load_ckpt
 try:
     from torch.utils.tensorboard import SummaryWriter
     HAS_TB = True
@@ -836,7 +836,7 @@ class HMARLTrainer:
 
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+        checkpoint = _load_ckpt(path, map_location='cpu')
         self.policy.load_state_dict(checkpoint['policy_state'])
         self.subgoal_embedding.load_state_dict(checkpoint['subgoal_embedding_state'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])

@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from hmarl.utils import set_seed, extract_obs_vector, build_centralized_obs
+from hmarl.utils import set_seed, extract_obs_vector, build_centralized_obs, load_ckpt
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 
 OBS_DIM = 115
@@ -496,7 +496,7 @@ class SHPPOTrainer:
         print(f"Model saved: {path}")
 
     def load(self, path):
-        ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
+        ckpt = load_ckpt(path, map_location=DEVICE)
         self.policy.load_state_dict(ckpt['policy_state'])
         self.inference_net.load_state_dict(ckpt['inference_state'])
         self.optimizer.load_state_dict(ckpt['optimizer_state'])

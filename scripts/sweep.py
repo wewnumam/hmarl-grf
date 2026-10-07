@@ -30,7 +30,7 @@ from hmarl.metrics import compute_win_rate, compute_goal_difference, formation_a
 from hmarl.rci import compute_rci
 from hmarl.utils import (
     set_seed, OBS_DIM, HIDDEN_DIM, HEAD_DIM, EPISODE_MAX_STEPS,
-    ProgressTracker, cleanup_temp_dirs, extract_obs_vector,
+    ProgressTracker, cleanup_temp_dirs, extract_obs_vector, load_ckpt,
 )
 
 try:
@@ -189,7 +189,7 @@ def objective(trial: Trial, timesteps: int, eval_episodes: int, base_seed: int) 
         # Evaluate best model
         ckpt_path = os.path.join(trainer.model_dir, "hmarl_model.pt")
         if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+            ckpt = load_ckpt(ckpt_path, map_location='cpu')
             trainer.policy.load_state_dict(ckpt['policy_state'])
             trainer.subgoal_embedding.load_state_dict(ckpt['subgoal_embedding_state'])
         metrics = evaluate_policy(trainer.policy, trainer.subgoal_embedding,

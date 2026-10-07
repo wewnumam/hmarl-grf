@@ -30,7 +30,7 @@ from hmarl.rci import compute_rci
 from hmarl.utils import (
     set_seed, extract_obs_vector, OBS_DIM, HIDDEN_DIM, HEAD_DIM,
     ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker,
-    cleanup_temp_dirs,
+    cleanup_temp_dirs, load_ckpt,
 )
 
 try:
@@ -75,7 +75,9 @@ def train_flat(algorithm: str, timesteps: int, seed: int, output_dir: str) -> st
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
     trainer.train()
-    return output_dir
+    if algorithm == "mappo":
+        return os.path.join(output_dir, "mappo_checkpoint.pt")
+    return os.path.join(output_dir, f"{algorithm}_model.pt")
 
 
 def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int) -> Dict:
@@ -86,7 +88,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
         hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
     ).to(DEVICE)
     subgoal_emb = SubGoalEmbedding().to(DEVICE)
-    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    ckpt = load_ckpt(ckpt_path, map_location='cpu')
     policy.load_state_dict(ckpt['policy_state'])
     subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
     policy.eval()
@@ -172,12 +174,13 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
     return metrics
 
 
-def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
+def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str = None) -> Dict:
     """Evaluate flat baseline using SB3 or random policy."""
     set_seed(seed)
     env = create_raw_env(render=False)
 
-    model_path = f"dumps/{algorithm}_model.pt"
+    if model_path is None:
+        model_path = f"dumps/{algorithm}_model.pt"
     if not os.path.exists(model_path):
         print(f"  WARNING: No model found at {model_path}. Running random.")
         algorithm = "random"
@@ -200,9 +203,11 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int) -> Dict:
         env.close()
         return {}
 
-    ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
+    ckpt = load_ckpt(model_path, map_location='cpu')
     if algorithm == "mappo":
-        model.load_state_dict(ckpt['actor_state'])
+        # MAPPO saves 'policy_state' in 'mappo_checkpoint.pt'
+        mkey = 'actor_state' if 'actor_state' in ckpt else 'policy_state'
+        model.load_state_dict(ckpt[mkey])
     else:
         model.load_state_dict(ckpt['policy_state'])
     model.eval()
@@ -371,7 +376,8 @@ def main():
         args.eval_episodes = 10
         args.seeds = min(args.seeds, 3)
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    if os.path.dirname(args.output):
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     all_results = {}
     hmarl_win_rates = []
@@ -397,8 +403,8 @@ def main():
                 elif alg == "random":
                     metrics = evaluate_random(args.eval_episodes, seed)
                 else:
-                    train_flat(alg, args.timesteps, seed, f"stat_temp/{alg}_{s}")
-                    metrics = evaluate_flat(alg, args.eval_episodes, seed + 1000)
+                    ckpt = train_flat(alg, args.timesteps, seed, f"stat_temp/{alg}_{s}")
+                    metrics = evaluate_flat(alg, args.eval_episodes, seed + 1000, model_path=ckpt)
 
                 seed_win_rates.append(metrics.get('win_rate', 0))
                 seed_rewards.append(metrics.get('avg_reward', 0) if 'avg_reward' in metrics else 0)

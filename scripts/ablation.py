@@ -51,6 +51,7 @@ from hmarl.rci import compute_rci
 from hmarl.utils import (
     set_seed, extract_obs_vector, OBS_DIM, HIDDEN_DIM, HEAD_DIM,
     ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker, cleanup_temp_dirs,
+    load_ckpt,
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -314,7 +315,7 @@ def evaluate_ablation_config(ckpt_path: str, num_episodes: int, seed: int,
         hidden_dim=HIDDEN_DIM, head_dim=HEAD_DIM, action_dim=ACTION_SPACE_SIZE,
     ).to(DEVICE)
     subgoal_emb = SubGoalEmbedding().to(DEVICE)
-    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    ckpt = load_ckpt(ckpt_path, map_location='cpu')
     policy.load_state_dict(ckpt['policy_state'])
     subgoal_emb.load_state_dict(ckpt['subgoal_embedding_state'])
     policy.eval()
