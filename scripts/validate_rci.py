@@ -80,6 +80,14 @@ def construct_validity(
         ('rci_cat', 'psr', 'positive'),
         ('rci_cat', 'ppr', 'positive'),
         ('rci_cat', 'win_rate', 'positive'),
+        # --- confound test (rci_nomove: movement matches excluded) ---
+        # If rci_cat's positive entropy/compactness correlations were a
+        # movement-volume artefact, these should flip NEGATIVE.
+        ('rci_nomove', 'fai_mean', 'positive'),
+        ('rci_nomove', 'positional_entropy', 'negative'),
+        ('rci_nomove', 'compactness_mean', 'negative'),
+        ('rci_nomove', 'psr', 'positive'),
+        ('rci_nomove', 'win_rate', 'positive'),
     ]
 
     results = {}
@@ -493,7 +501,7 @@ def novelty_scatter(
         return {'error': 'scipy not installed'}
 
     result = {}
-    for rci_key in ['rci_cat', 'rci_strict', 'rci_streak']:
+    for rci_key in ['rci_cat', 'rci_strict', 'rci_streak', 'rci_nomove']:
         for faim_key in ['fai_mean', 'fai']:
             if rci_key not in per_episode_metrics or faim_key not in per_episode_metrics:
                 continue
@@ -827,7 +835,7 @@ def main():
         for alg in args.algorithms:
             print(f"\n  Evaluating: {alg.upper()}")
             seed_metrics = {
-                'rci_cat': [], 'rci_strict': [],
+                'rci_cat': [], 'rci_strict': [], 'rci_nomove': [],
                 'fai_mean': [], 'positional_entropy': [],
                 'compactness_mean': [], 'psr': [], 'ppr': [],
                 'win_rate': [],
@@ -860,9 +868,11 @@ def main():
 
                     rci_val = metrics.get('rci_cat')
                     rci_str = f"{rci_val:.4f}" if isinstance(rci_val, (int, float)) and not np.isnan(rci_val) else "N/A"
+                    nomove_val = metrics.get('rci_nomove')
+                    nomove_str = f"{nomove_val:.4f}" if isinstance(nomove_val, (int, float)) and not np.isnan(nomove_val) else "N/A"
                     wr_val = metrics.get('win_rate', 0)
                     wr_str = f"{wr_val:.1f}%" if isinstance(wr_val, (int, float)) else "N/A"
-                    print(f"    Seed {s+1}: RCI_cat={rci_str}, WR={wr_str}")
+                    print(f"    Seed {s+1}: RCI_cat={rci_str}, RCI_nomove={nomove_str}, WR={wr_str}")
 
                 except Exception as e:
                     traceback.print_exc()

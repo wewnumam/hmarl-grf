@@ -41,6 +41,24 @@ def f_category(actual: int, ideal: int) -> float:
     return 1.0 if cat_actual == cat_ideal else 0.0
 
 
+def f_category_nomove(actual: int, ideal: int) -> float:
+    """Category matching EXCLUDING movement confound.
+
+    Movement dominates both sides (8 of 19 actions) — a movement-vs-movement
+    "match" carries no role information. Only non-movement categories
+    (passing, shooting, ball_control, defensive) earn credit.
+
+    Motivation (confound test, 2026-10-06): rci_cat correlated ~+0.9 with
+    positional_entropy and compactness, both expected NEGATIVE. Hypothesis:
+    that correlation is an artefact of movement volume, not role coherence.
+    """
+    cat_actual = get_action_category(actual)
+    cat_ideal = get_action_category(ideal)
+    if cat_actual == 'movement':
+        return 0.0
+    return 1.0 if cat_actual == cat_ideal else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Per-timestep RCI (original)
 # ---------------------------------------------------------------------------
@@ -92,6 +110,28 @@ def compute_rci_category(
     Returns:
         (rci_overall, rci_per_agent)
     """
+    return _compute_rci_generic(actual_actions, ideal_actions, f_category)
+
+
+def compute_rci_nomove(
+    actual_actions: List[List[int]],
+    ideal_actions: List[List[int]],
+) -> Tuple[float, List[float]]:
+    """Compute RCI_nomove over an episode (movement matches earn zero).
+
+    Diagnostic variant to test the movement-volume confound.
+    Lower absolute value than rci_cat is expected — the movement term
+    previously contributed a large inflated baseline.
+    """
+    return _compute_rci_generic(actual_actions, ideal_actions, f_category_nomove)
+
+
+def _compute_rci_generic(
+    actual_actions: List[List[int]],
+    ideal_actions: List[List[int]],
+    match_fn,
+) -> Tuple[float, List[float]]:
+    """Shared RCI computation with pluggable per-timestep match function."""
     if not actual_actions or not ideal_actions:
         return 0.0, []
 
@@ -101,7 +141,7 @@ def compute_rci_category(
     per_agent_scores = np.zeros(num_agents)
     for t in range(min(T, len(ideal_actions))):
         for i in range(num_agents):
-            per_agent_scores[i] += f_category(
+            per_agent_scores[i] += match_fn(
                 actual_actions[t][i],
                 ideal_actions[t][i],
             )
@@ -223,10 +263,12 @@ def compute_rci(
     """
     strict_overall, strict_per_agent = compute_rci_strict(actual_actions, ideal_actions)
     cat_overall, cat_per_agent = compute_rci_category(actual_actions, ideal_actions)
+    nomove_overall, _ = compute_rci_nomove(actual_actions, ideal_actions)
 
     result = {
         'rci_strict': strict_overall,
         'rci_cat': cat_overall,
+        'rci_nomove': nomove_overall,
         'rci_strict_per_agent': strict_per_agent,
         'rci_cat_per_agent': cat_per_agent,
     }

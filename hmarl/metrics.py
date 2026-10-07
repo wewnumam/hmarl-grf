@@ -605,6 +605,7 @@ def compute_all_metrics(
         # RCI
         'rci_strict': rci_results['rci_strict'],
         'rci_cat': rci_results['rci_cat'],
+        'rci_nomove': rci_results['rci_nomove'],
         'rci_strict_per_agent': rci_results['rci_strict_per_agent'],
         'rci_cat_per_agent': rci_results['rci_cat_per_agent'],
     }
