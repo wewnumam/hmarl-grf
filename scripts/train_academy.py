@@ -28,6 +28,9 @@ import torch.optim as optim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hmarl.env import create_raw_env, extract_game_state, ACTION_SPACE_SIZE
+from hmarl.run_logging import (
+    run_metadata, save_run_log, hyperparams_snapshot, obs_snapshot, OBS_HMARL_115,
+)
 from hmarl.utils import (
     extract_obs_vector as _extract_obs_util,
     set_seed as _set_seed_util,
@@ -231,14 +234,15 @@ class AcademyTrainer:
 
             new_game_state = extract_game_state(obs_raw)
 
-            # Reward = raw game reward + goal bonus
+            # Reward = raw game reward (summed over controlled agents) + goal bonus
             _score = new_game_state.get('score', [0, 0])
             _gf = _score[0] if isinstance(_score, (list, tuple)) else 0
             goals_scored = _gf - prev_gf
-            reward = float(game_reward) + self.goal_bonus * max(0, goals_scored)
+            game_reward = float(np.sum(game_reward))  # multi-agent: per-agent array
+            reward = game_reward + self.goal_bonus * max(0, goals_scored)
             prev_gf = _gf
 
-            episode_game_reward += float(game_reward)
+            episode_game_reward += game_reward
             episode_reward += reward
 
             # Store per-agent transitions (shared team reward)
@@ -304,6 +308,31 @@ class AcademyTrainer:
 
         self.buffer.reset()
 
+    def _build_run_log(self, train_time_s=None):
+        """Run log: shared metadata + hyperparams + per-episode iteration results."""
+        payload = run_metadata(
+            script="scripts/train_academy.py",
+            algo="ppo",
+            scenario=self.scenario,
+            num_agents=self.num_agents,
+            total_timesteps=self.total_timesteps,
+            timesteps_executed=self.global_step,
+            episodes=len(self.log['episode_rewards']),
+            train_time_s=round(train_time_s, 2) if train_time_s is not None else None,
+            goal_bonus=self.goal_bonus,
+            hyperparams=hyperparams_snapshot({
+                "learning_rate": LEARNING_RATE, "gamma": GAMMA, "gae_lambda": GAE_LAMBDA,
+                "clip_range": CLIP_RANGE, "ent_coef": ENT_COEF, "vf_coef": VF_COEF,
+                "minibatch_size": MINIBATCH_SIZE, "num_epochs": NUM_EPOCHS,
+                "goal_bonus": self.goal_bonus,
+            }),
+            observation=obs_snapshot(
+                "raw game_state -> hmarl.utils.extract_obs_vector", [OBS_DIM], OBS_HMARL_115,
+            ),
+        )
+        payload.update(self.log)
+        return payload
+
     def train(self):
         print(f"Academy Trainer: {self.scenario} | agents={self.num_agents} | "
               f"timesteps={self.total_timesteps} | GOAL_BONUS={self.goal_bonus}")
@@ -339,10 +368,11 @@ class AcademyTrainer:
         if pbar:
             pbar.close()
 
-        # Save log
-        log_path = os.path.join(self.log_dir, 'training_log.json')
-        with open(log_path, 'w') as f:
-            json.dump(self.log, f, indent=2)
+        # Save log (shared metadata + hyperparams + per-episode iteration results)
+        save_run_log(
+            os.path.join(self.log_dir, 'training_log.json'),
+            self._build_run_log(train_time_s=time.time() - start_time),
+        )
 
         # Save model
         model_path = os.path.join(self.log_dir, 'academy_model.pt')
@@ -356,8 +386,9 @@ class AcademyTrainer:
         print(f"Training complete: {n} episodes in {elapsed:.0f}s")
         print(f"Total GF={total_gf} GA={total_ga}")
         print(f"Scoring rate: {total_gf/n:.2f} goals/episode")
-        print(f"First 25% avg GF: {sum(self.log['episode_gf'][:n//4])/(n//4):.2f}")
-        print(f"Last  25% avg GF: {sum(self.log['episode_gf'][-n//4:])/(n//4):.2f}")
+        q = max(1, n // 4)  # short runs: avoid 0-episode quartiles
+        print(f"First 25% avg GF: {sum(self.log['episode_gf'][:q])/q:.2f}")
+        print(f"Last  25% avg GF: {sum(self.log['episode_gf'][-q:])/q:.2f}")
         print(f"Saved: {log_path}, {model_path}")
         print(f"{'='*60}")
 
@@ -388,9 +419,10 @@ def main():
     # Graceful shutdown
     def _shutdown(signum, frame):
         print(f"\n[SHUTDOWN] Saving...")
-        log_path = os.path.join(args.log_dir, 'training_log.json')
-        with open(log_path, 'w') as f:
-            json.dump(trainer.log, f, indent=2)
+        save_run_log(
+            os.path.join(args.log_dir, 'training_log.json'),
+            trainer._build_run_log(),
+        )
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)

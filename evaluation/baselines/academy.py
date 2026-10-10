@@ -1,21 +1,32 @@
 import argparse
+import glob
+import json
+import os
+import sys
+import time
 import gfootball.env as football_env
+
+# Ensure project root is on path so `import hmarl` works
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import numpy as np
 import gym  # old gym: SB3 1.3.0 isinstance-checks spaces against these classes
 import matplotlib.pyplot as plt
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, A2C
 from stable_baselines3.common.callbacks import BaseCallback
 from typing import Any, Dict, List, Optional, Tuple
+from hmarl.run_logging import (
+    run_metadata, save_run_log, sb3_hyperparams, obs_snapshot, OBS_SIMPLE115V2,
+)
 
 # --- Configuration Constants ---
 DEFAULT_ENV_NAME = "academy_empty_goal_close"
 DEFAULT_NUM_AGENTS = 1
 ACTION_SPACE_SIZE = 19
 LOG_DIR = "dumps"
-TRAINING_REWARD_PLOT_PATH = "dumps/training_mean_episode_reward.png"
-TRAINING_LENGTH_PLOT_PATH = "dumps/training_mean_episode_length.png"
 
-parser = argparse.ArgumentParser(description="Train and evaluate a PPO baseline in Google Research Football.")
+parser = argparse.ArgumentParser(description="Train and evaluate PPO or A2C baselines in Google Research Football.")
+parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "a2c"], help="Algorithm: ppo or a2c.")
 parser.add_argument("--env-name", type=str, default=DEFAULT_ENV_NAME, help="GRF environment name to use.")
 parser.add_argument("--num-agents", type=int, default=DEFAULT_NUM_AGENTS, help="Number of controlled agents.")
 parser.add_argument("--render", action="store_true", help="Render the environment during evaluation.")
@@ -25,6 +36,56 @@ parser.add_argument("--eval-steps", type=int, default=3000, help="Maximum evalua
 args = parser.parse_args()
 ENV_NAME = args.env_name
 NUM_AGENTS = args.num_agents
+
+# Combined comparison figures: one line per algorithm, rebuilt from all JSON logs
+TRAINING_REWARD_PLOT_PATH = f"dumps/{ENV_NAME}_training_mean_episode_reward.png"
+TRAINING_LENGTH_PLOT_PATH = f"dumps/{ENV_NAME}_training_mean_episode_length.png"
+ALGO_COLORS = {"ppo": "tab:green", "a2c": "tab:orange"}
+
+
+def plot_training_comparison():
+    """Overlay every algorithm's training curve (from saved JSON logs) on one figure."""
+    plt.style.use("seaborn-darkgrid")
+    plt.rcParams['mathtext.fontset'] = 'cm'
+    plt.rcParams['font.family'] = 'serif'
+    plt.rcParams['font.serif'] = ['cmr10', 'Computer Modern Roman', 'DejaVu Serif']
+    
+    for metric, ylabel, plot_path in (
+        ("episode_rewards", "Mean episode reward", TRAINING_REWARD_PLOT_PATH),
+        ("episode_lengths", "Mean episode length (steps)", TRAINING_LENGTH_PLOT_PATH),
+    ):
+        plt.figure(figsize=(4, 4))
+        plotted = False
+        for json_path in sorted(glob.glob(f"{LOG_DIR}/*_{ENV_NAME}_training_log.json")):
+            with open(json_path) as f:
+                log = json.load(f)
+            data = log.get(metric, [])
+            if not data:
+                continue
+            algo = log.get("algo", os.path.basename(json_path).split("_")[0])
+            episodes = np.arange(1, len(data) + 1)
+            mean_values = np.cumsum(data) / episodes
+            plt.plot(
+                episodes,
+                mean_values,
+                label=algo.upper(),
+                color=ALGO_COLORS.get(algo, None),
+            )
+            plotted = True
+
+        if not plotted:
+            plt.close()
+            continue
+        
+        plt.xlabel("Episode")
+        plt.ylabel(ylabel)
+        plt.title(f"{ENV_NAME} ($n$={NUM_AGENTS})")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+        print(f"Comparison plot saved to {plot_path}")
 
 
 class EpisodeRewardCallback(BaseCallback):
@@ -145,94 +206,89 @@ class FootballGymEnv(gym.Env):
         """Closes the environment."""
         self.env.close()
 
-class SoccerMatchPPO:
+class SoccerMatch:
     """
-    Model class that manages the soccer environment and PPO training.
+    Model class that manages the soccer environment and PPO/A2C training.
     Follows structure similar to the A2C implementation.
     """
-    def __init__(self, env_name: str = ENV_NAME, num_agents: int = NUM_AGENTS, render: bool = False):
+    def __init__(self, env_name: str = ENV_NAME, num_agents: int = NUM_AGENTS, render: bool = False, algo: str = "ppo"):
         self.env_name = env_name
         self.num_agents = num_agents
         self.render = render
+        self.algo = algo.lower()
         self.env = FootballGymEnv(
             env_name,
             num_agents,
             render,
             write_full_episode_dumps=False,
         )
-        
-        # Initialize PPO model following the style of baseline3_ppo.py
-        print(f"Initializing PPO on {env_name}...")
-        self.model = PPO(
-            policy="MlpPolicy",
-            env=self.env,
-            verbose=1,
-            learning_rate=3e-4, # Standard PPO learning rate
-            n_steps=2048,       # More steps per update for PPO stability
-            batch_size=64,
-            n_epochs=10,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.01
-        )
+
+        # Initialize model following the style of baseline3_ppo.py
+        print(f"Initializing {self.algo.upper()} on {env_name}...")
+        if self.algo == "a2c":
+            # A2C: on-policy, updates every n_steps; no clipping/n_epochs.
+            # ent_coef/vf_coef kept equal to PPO's for comparability.
+            self.model = A2C(
+                policy="MlpPolicy",
+                env=self.env,
+                verbose=1,
+                learning_rate=7e-4,
+                n_steps=5,
+                gamma=0.99,
+                ent_coef=0.01,
+                vf_coef=0.5,
+            )
+        else:
+            self.model = PPO(
+                policy="MlpPolicy",
+                env=self.env,
+                verbose=1,
+                learning_rate=3e-4, # Standard PPO learning rate
+                n_steps=2048,       # More steps per update for PPO stability
+                batch_size=64,
+                n_epochs=10,
+                gamma=0.99,
+                gae_lambda=0.95,
+                clip_range=0.2,
+                ent_coef=0.01
+            )
 
     def train(self, total_timesteps: int = 25000):
-        """Trains the PPO model."""
+        """Trains the model (PPO or A2C)."""
         print(f"Starting training for {total_timesteps} steps...")
         reward_callback = EpisodeRewardCallback()
+        train_start = time.time()
         self.model.learn(
             total_timesteps=total_timesteps,
             callback=reward_callback,
         )
+        train_time_s = time.time() - train_start
 
-        if reward_callback.episode_rewards:
-            episode_numbers = np.arange(1, len(reward_callback.episode_rewards) + 1)
-            mean_episode_rewards = (
-                np.cumsum(reward_callback.episode_rewards) / episode_numbers
-            )
-            mean_episode_lengths = (
-                np.cumsum(reward_callback.episode_lengths) / episode_numbers
-            )
+        # Save per-episode iteration results + run metadata as JSON (replot later without retraining)
+        log_path = os.path.join(LOG_DIR, f"{self.algo}_{ENV_NAME}_training_log.json")
+        payload = run_metadata(
+            script="evaluation/baselines/academy.py",
+            algo=self.algo,
+            env_name=self.env_name,
+            num_agents=self.num_agents,
+            train_time_s=round(train_time_s, 2),
+            total_timesteps=total_timesteps,
+            timesteps_executed=int(self.model.num_timesteps),
+            episodes=len(reward_callback.episode_rewards),
+            hyperparams=sb3_hyperparams(self.model),
+            observation=obs_snapshot("simple115v2", [self.num_agents, 115], OBS_SIMPLE115V2),
+            episode_rewards=reward_callback.episode_rewards,
+            episode_lengths=reward_callback.episode_lengths,
+        )
+        save_run_log(log_path, payload)
 
-            plt.figure(figsize=(10, 5))
-            plt.plot(
-                episode_numbers,
-                mean_episode_rewards,
-                label="Mean episode reward",
-                color="tab:green",
-            )
-            plt.xlabel("Episode")
-            plt.ylabel("Mean episode reward")
-            plt.title("Training Mean Episode Reward")
-            plt.grid(alpha=0.3)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(TRAINING_REWARD_PLOT_PATH, dpi=150)
-            plt.close()
-            print(f"Training reward plot saved to {TRAINING_REWARD_PLOT_PATH}")
-
-            plt.figure(figsize=(10, 5))
-            plt.plot(
-                episode_numbers,
-                mean_episode_lengths,
-                label="Mean episode length",
-                color="tab:orange",
-            )
-            plt.xlabel("Episode")
-            plt.ylabel("Mean episode length (steps)")
-            plt.title("Training Mean Episode Length")
-            plt.grid(alpha=0.3)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(TRAINING_LENGTH_PLOT_PATH, dpi=150)
-            plt.close()
-            print(f"Training length plot saved to {TRAINING_LENGTH_PLOT_PATH}")
+        # Rebuild combined comparison figure from all saved algorithm logs
+        plot_training_comparison()
         
         # ponytail: was "ppo_11v11_model" — clobbered the 11v11 baseline artifact
-        model_path = f"ppo_{ENV_NAME}_model"
+        model_path = f"{self.algo}_{ENV_NAME}_model"
         self.model.save(model_path)
-        print(f"Training finished. Model saved to {model_path}.zip")
+        print(f"Training finished in {train_time_s:.1f}s. Model saved to {model_path}.zip")
 
     def run(self, max_steps: int = 3000):
         """Evaluates the trained model in the environment."""
@@ -270,10 +326,11 @@ class SoccerMatchPPO:
             self.env.close()
 
 if __name__ == "__main__":
-    match = SoccerMatchPPO(
+    match = SoccerMatch(
         env_name=ENV_NAME,
         num_agents=NUM_AGENTS,
         render=args.render,
+        algo=args.algo,
     )
 
     match.train(total_timesteps=args.train_steps)

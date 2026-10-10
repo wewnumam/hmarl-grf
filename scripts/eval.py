@@ -54,6 +54,9 @@ from hmarl.metrics import (
     ball_progression_rate,
 )
 from hmarl.rci import compute_rci
+from hmarl.run_logging import (
+    run_metadata, save_run_log, hyperparams_snapshot, obs_snapshot, OBS_HMARL_115,
+)
 from evaluation.visualizations import (
     plot_role_heatmap,
     plot_positions,
@@ -119,6 +122,7 @@ def evaluate_hmarl(
     num_episodes: int = 100,
     render: bool = False,
     output_dir: str = "evaluation_results",
+    checkpoint_path: str = None,
 ) -> Dict:
     """Run full HMARL evaluation.
 
@@ -128,11 +132,15 @@ def evaluate_hmarl(
     3. RCI across all episodes
     """
     os.makedirs(output_dir, exist_ok=True)
+    eval_start = time.time()
     DEVICE = next(policy.parameters()).device
 
     env = create_raw_env(render=render)
     controller = HierarchicalController()
-    expert = ExpertPolicyEval()  # Anti-circularity: eval uses detuned expert
+    # Anti-circularity: eval uses detuned expert (ExpertPolicyEval has no
+    # get_ideal_actions wrapper — inject into ExpertPolicyAllAgents)
+    expert = ExpertPolicyAllAgents()
+    expert.policy = ExpertPolicyEval()
 
     all_match_results = []
     all_goals_for = []
@@ -312,7 +320,7 @@ def evaluate_hmarl(
     # Print results
     print_metrics(metrics, "HMARL")
 
-    # Save results
+    # Save results (shared metadata + metrics)
     results_path = os.path.join(output_dir, "hmarl_results.json")
     serializable = {k: v for k, v in metrics.items()
                     if not isinstance(v, (list, np.ndarray)) or
@@ -324,9 +332,19 @@ def evaluate_hmarl(
         elif isinstance(v, list):
             serializable[k] = [float(x) for x in v]
 
-    with open(results_path, 'w') as f:
-        json.dump(serializable, f, indent=2)
-    print(f"Results saved to {results_path}")
+    payload = run_metadata(
+        script="scripts/eval.py",
+        algo="hmarl",
+        checkpoint=checkpoint_path,
+        num_episodes=num_episodes,
+        output_dir=output_dir,
+        eval_time_s=round(time.time() - eval_start, 2),
+        observation=obs_snapshot(
+            "raw game_state -> hmarl.utils.extract_obs_vector", [OBS_DIM], OBS_HMARL_115,
+        ),
+    )
+    payload.update(serializable)
+    save_run_log(results_path, payload)
 
     # Per-episode breakdown
     episode_data = {
@@ -472,6 +490,7 @@ def evaluate_random_baseline(
     import random
 
     os.makedirs(output_dir, exist_ok=True)
+    eval_start = time.time()
     env = create_raw_env(render=render)
     expert = ExpertPolicyAllAgents()
     controller = HierarchicalController()
@@ -587,8 +606,18 @@ def evaluate_random_baseline(
             serializable[k] = v
         elif isinstance(v, list):
             serializable[k] = [float(x) for x in v]
-    with open(results_path, 'w') as f:
-        json.dump(serializable, f, indent=2)
+    payload = run_metadata(
+        script="scripts/eval.py",
+        algo="random",
+        num_episodes=num_episodes,
+        output_dir=output_dir,
+        eval_time_s=round(time.time() - eval_start, 2),
+        observation=obs_snapshot(
+            "raw game_state -> hmarl.utils.extract_obs_vector", [OBS_DIM], OBS_HMARL_115,
+        ),
+    )
+    payload.update(serializable)
+    save_run_log(results_path, payload)
 
     env.close()
     return metrics
@@ -617,6 +646,7 @@ if __name__ == "__main__":
         num_episodes=args.episodes,
         render=args.render,
         output_dir=args.output_dir,
+        checkpoint_path=args.checkpoint,
     )
 
     # Run baselines if requested

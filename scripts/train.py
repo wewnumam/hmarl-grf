@@ -58,6 +58,9 @@ from hmarl.metrics import (
     formation_adherence_index,
 )
 from hmarl.rci import compute_rci
+from hmarl.run_logging import (
+    run_metadata, save_run_log, hyperparams_snapshot, obs_snapshot, OBS_HMARL_115,
+)
 
 # ---------------------------------------------------------------------------
 # PPO Hyperparameters (from thesis Table 9)
@@ -664,9 +667,31 @@ class HMARLTrainer:
                 serializable[k] = [float(x) if hasattr(x, 'item') else x for x in v]
             else:
                 serializable[k] = v
-        with open(path, 'w') as f:
-            _json.dump(serializable, f, indent=2)
-        print(f"Training log saved: {path}")
+        payload = run_metadata(
+            script="scripts/train.py",
+            algo="hmarl",
+            scenario=self.scenario,
+            env_name=self.env_name,
+            num_agents=self.num_agents,
+            total_timesteps=self.total_timesteps,
+            timesteps_executed=self.global_step,
+            episodes=self.episode_count,
+            train_time_s=round(time.time() - self._train_start, 2)
+            if getattr(self, '_train_start', None) else None,
+            hyperparams=hyperparams_snapshot({
+                "learning_rate": LEARNING_RATE, "gamma": GAMMA, "gae_lambda": GAE_LAMBDA,
+                "clip_range": CLIP_RANGE, "ent_coef": ENT_COEF, "vf_coef": VF_COEF,
+                "minibatch_size": MINIBATCH_SIZE, "num_epochs": NUM_EPOCHS,
+                "hidden_dim": HIDDEN_DIM, "head_dim": HEAD_DIM,
+                "subgoal_embed_dim": SUBGOAL_EMBED_DIM,
+                "enable_fai": ENABLE_FAI, "enable_ppr": ENABLE_PPR, "enable_rci": ENABLE_RCI,
+            }),
+            observation=obs_snapshot(
+                "raw game_state -> hmarl.utils.extract_obs_vector", [OBS_DIM], OBS_HMARL_115,
+            ),
+        )
+        payload.update(serializable)
+        save_run_log(path, payload)
 
     def train(self):
         """Main training loop."""
@@ -677,6 +702,7 @@ class HMARLTrainer:
         print(f"{'='*60}")
 
         start_time = time.time()
+        self._train_start = start_time
         episode_rewards = []
         self._init_training_log()
 

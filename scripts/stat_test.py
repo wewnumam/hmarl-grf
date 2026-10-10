@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import traceback
 from typing import Dict, List
 
@@ -32,6 +33,7 @@ from hmarl.utils import (
     ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker,
     cleanup_temp_dirs, load_ckpt,
 )
+from hmarl.run_logging import run_metadata
 
 try:
     from scipy import stats
@@ -381,6 +383,7 @@ def main():
 
     all_results = {}
     hmarl_win_rates = []
+    main_start = time.time()
 
     for alg in args.algorithms:
         print(f"\n{'='*60}")
@@ -455,6 +458,11 @@ def main():
 
     # Save results
     output = {
+        'meta': run_metadata(
+            script="scripts/stat_test.py",
+            train_time_s=round(time.time() - main_start, 2),
+            algorithms=args.algorithms,
+        ),
         'config': {
             'seeds': args.seeds,
             'timesteps': args.timesteps,

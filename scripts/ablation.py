@@ -53,6 +53,7 @@ from hmarl.utils import (
     ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker, cleanup_temp_dirs,
     load_ckpt,
 )
+from hmarl.run_logging import run_metadata
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -527,6 +528,11 @@ def main():
 
     # Save
     output = {
+        'meta': run_metadata(
+            script="scripts/ablation.py",
+            train_time_s=round(time.time() - total_start, 2),
+            configs_run=configs_to_run,
+        ),
         'config': {
             'timesteps': args.timesteps,
             'eval_episodes': args.eval_episodes,

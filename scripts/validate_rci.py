@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import traceback
 try:
     from tqdm import tqdm
@@ -29,6 +30,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from hmarl.run_logging import run_metadata
 
 try:
     from scipy import stats as sp_stats
@@ -790,6 +793,8 @@ def main():
                         help="Quick mode: fewer steps/episodes")
     args = parser.parse_args()
 
+    main_start = time.time()
+
     if os.path.dirname(args.output):
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
@@ -892,6 +897,12 @@ def main():
         )
 
     # Save
+    report['meta'] = run_metadata(
+        script="scripts/validate_rci.py",
+        train_time_s=round(time.time() - main_start, 2),
+        algorithms=args.algorithms,
+        loaded_from=args.load_results,
+    )
     with open(args.output, 'w') as f:
         json.dump(report, f, indent=2, default=str)
     print(f"\n{'='*60}")

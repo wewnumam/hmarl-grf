@@ -60,7 +60,7 @@ def extract_obs_vector(game_state: Dict, player_idx: int,
     features.append(float(game_state.get('ball_owned_team', -1)))
     features.append(float(game_state.get('ball_owned_player', -1)))
 
-    for i in range(11):
+    for i in range(min(11, len(game_state.get('left_team', [[0, 0]] * 11)))):
         pos = game_state.get('left_team', [[0, 0]] * 11)[i]
         d = game_state.get('left_team_direction', [[0, 0]] * 11)[i] \
             if 'left_team_direction' in game_state else [0, 0]

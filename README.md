@@ -302,7 +302,15 @@ python scripts/diagnose_expert.py --episodes 5 --output evaluation_results/exper
 
 **Root cause:** Reward shaping uses `f_cat` (category match), not `f_strict`. No gradient signal for exact action matching. RCI contribution per agent: 0.05 × 0.47 / 11 ≈ 0.0022/step — negligible compared to entropy coefficient (0.01) and FAI contribution (0.083/step).
 
-**Implication:** RCI_strict cannot be used as evidence that agents learn exact expert actions. RCI_cat (~0.47) is the meaningful metric, but it's inflated by movement category dominance (8 of 19 actions = movement).
+**Implication:** RCI_strict cannot be used as evidence that agents learn exact expert actions. RCI_cat (~0.47) is the meaningful metric, but it's inflated by movement category dominance (8 of 19 actions = movement). An rci_nomove diagnostic variant (movement matches earn zero) was added 2026-10-06 to quantify this inflation directly — see "RCI Validity Evaluation" below.
+
+### Issue 6: RCI-Entropy/Compactness Correlations Have Wrong Sign (2026-10-06)
+
+**Symptom:** Post-fix validation run showed rci_cat ↔ positional_entropy r=+0.923 and rci_cat ↔ compactness_mean r=+0.898 — both strongly POSITIVE, both expected NEGATIVE ("coherent team = tighter formation").
+
+**Root cause hypothesis:** movement-volume confound. Movement actions (8/19) dominate both rci_cat (as a large easy-match base) and both spread metrics (more movement → more zones visited → higher entropy; more wandering → larger centroid RMS → higher compactness ρ). One latent factor may drive all three.
+
+**Test:** `rci_nomove` — if its entropy/compactness correlations flip negative, the confound hypothesis holds; if they stay positive, the "coherent = compact" intuition itself is wrong. Discrimination vs random passed (p=0.022) in the same run, and rci_cat ↔ FAI r=0.906 confirms low novelty (redundancy RED threshold >0.8).
 
 ### Issue 4: Reward Dominated by Shaping (~99%)
 
@@ -534,7 +542,7 @@ python scripts/eval.py --checkpoint checkpoints/hmarl_model.pt --render
 **Metrics computed:**
 - **Performance**: Win Rate, Goal Difference, Cumulative Reward
 - **Coordination**: PSR, PPR, Positional Entropy, Team Compactness, FAI
-- **Role Coherence**: RCI_strict (exact match), RCI_cat (category match)
+- **Role Coherence**: RCI_strict (exact match), RCI_cat (category match), RCI_nomove (category match, movement excluded — diagnostic)
 - **Action Analysis**: Action distribution, entropy, dominant action % (mode collapse detection)
 
 **Output files:**
@@ -779,6 +787,16 @@ python scripts/validate_rci.py --algorithms hmarl ippo shppo random
 - RCI_strict ↔ Positional Entropy (expected: negative)
 - RCI_cat ↔ Compactness (expected: negative)
 - RCI_cat ↔ PSR/PPR/Win Rate (expected: positive)
+- **Confound test (added 2026-10-06):** RCI_nomove ↔ FAI/Entropy/Compactness/PSR/Win Rate (same expected directions)
+
+**RCI_nomove (movement-confound diagnostic, added 2026-10-06):** A diagnostic RCI variant where movement-vs-movement matches earn zero (`f_category_nomove` in `hmarl/rci.py`). Motivation: validation runs showed `rci_cat` correlating ~+0.9 with positional entropy and compactness, both expected NEGATIVE. Since movement dominates (8 of 19 actions) and drives both entropy and compactness upward, that correlation may be an artefact of movement volume rather than role coherence. `rci_nomove` is exposed through `compute_rci()` / `compute_all_metrics()` and collected per seed by `validate_rci.py`.
+
+Interpretation of the confound test:
+- rci_nomove↔entropy/compactness **flips negative** → prior positive correlations were a movement artefact; use rci_nomove (or correct expectations) in BAB_4
+- **stays positive** → real relationship opposing "coherent = compact" intuition; hypothesis needs rewording
+- **≈0 / not significant** → RCI captures a different movement-volume dimension; weak link to spread either way
+
+**Note on `--load-results`:** pre-computed result files from before 2026-10-06 do not contain `rci_nomove` — re-run training/evaluation (not just the correlation step) to get confound-test results.
 
 ## Ablation Study
 

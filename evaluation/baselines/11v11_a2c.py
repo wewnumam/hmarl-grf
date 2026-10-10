@@ -1,27 +1,71 @@
+"""Flat A2C baseline on GRF 11_vs_11_stochastic (SB3, old-gym API).
+
+Run-logging schema matches evaluation/baselines/academy.py:
+per-episode results + run metadata -> dumps/{algo}_{env}_training_log.json.
+"""
+import os
+import sys
+import time
+
 import gfootball.env as football_env
 import numpy as np
-import gymnasium as gym
+import gym  # old gym: SB3 1.3.0 isinstance-checks spaces against these classes
 from stable_baselines3 import A2C
+from stable_baselines3.common.callbacks import BaseCallback
 from typing import Any, Dict, List, Tuple
+
+# Ensure project root is on path so `import hmarl` works
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from hmarl.run_logging import (
+    run_metadata, save_run_log, sb3_hyperparams, obs_snapshot, OBS_SIMPLE115V2,
+)
 
 # --- Configuration Constants ---
 ENV_NAME = "11_vs_11_stochastic"
 NUM_AGENTS = 11
 ACTION_SPACE_SIZE = 19
 LOG_DIR = "dumps"
+ALGO = "a2c"
+
+
+class EpisodeRewardCallback(BaseCallback):
+    """Collect one total reward value for every completed training episode."""
+
+    def __init__(self):
+        super().__init__()
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self._current_reward = 0.0
+        self._current_length = 0
+
+    def _on_step(self) -> bool:
+        rewards = self.locals["rewards"]
+        dones = self.locals["dones"]
+
+        self._current_reward += float(rewards[0])
+        self._current_length += 1
+        if dones[0]:
+            self.episode_rewards.append(self._current_reward)
+            self.episode_lengths.append(self._current_length)
+            self._current_reward = 0.0
+            self._current_length = 0
+
+        return True
+
 
 class FootballGymEnv(gym.Env):
     """
-    A Gymnasium-compatible wrapper for the Google Research Football environment.
-    This wrapper adapts the multi-agent GRF environment to a single-policy interface 
-    suitable for Stable Baselines 3, enabling training with A2C.
+    A Gym-compatible wrapper for the Google Research Football environment.
+    This wrapper adapts the multi-agent GRF environment to a single-policy interface
+    suitable for Stable Baselines 3 (Python 3.6 / old-gym API).
     """
     def __init__(self, env_name: str = ENV_NAME, num_agents: int = NUM_AGENTS, render: bool = False):
         super().__init__()
         self.num_agents = num_agents
-        
+
         # Create GRF environment
-        env = football_env.create_environment(
+        self.env = football_env.create_environment(
             env_name=env_name,
             representation="simple115v2",
             number_of_left_players_agent_controls=num_agents,
@@ -30,82 +74,46 @@ class FootballGymEnv(gym.Env):
             write_full_episode_dumps=False,
             render=render
         )
-        self.env = self._patch_grf_env(env)
-        
+
         # Action space: 11 agents
         self.action_space = gym.spaces.MultiDiscrete([ACTION_SPACE_SIZE] * num_agents)
-        
+
         # Observation space: (11, 115)
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(num_agents, 115), 
+            low=-np.inf,
+            high=np.inf,
+            shape=(num_agents, 115),
             dtype=np.float32
         )
 
-    def _patch_grf_env(self, env: Any) -> Any:
-        """Recursively patches GRF environment hierarchy for Gymnasium compatibility."""
-        import types
+    def reset(self) -> np.ndarray:
+        """Resets the environment (SB3 1.3.0 old-gym: obs only)."""
+        result = self.env.reset()
+        if isinstance(result, tuple):
+            result = result[0]
+        return np.array(result, dtype=np.float32)
 
-        def patch_single_env(e):
-            # Avoid double patching
-            if hasattr(e, '_is_patched'):
-                return
-            
-            orig_reset = e.reset
-            orig_step = e.step
-
-            def reset_wrapper(self_env, *args, **kwargs) -> Tuple[Any, Dict[str, Any]]:
-                try:
-                    result = orig_reset(*args, **kwargs)
-                except (TypeError, ValueError):
-                    # Handle cases where inner reset might fail due to same unpacking issue
-                    # or doesn't accept new-style arguments
-                    result = orig_reset()
-                
-                if isinstance(result, tuple) and len(result) == 2:
-                    return result
-                return result, {}
-
-            def step_wrapper(self_env, *args, **kwargs) -> Tuple[Any, float, bool, bool, Dict[str, Any]]:
-                result = orig_step(*args, **kwargs)
-                # GRF step returns (obs, reward, done, info)
-                if isinstance(result, tuple) and len(result) == 4:
-                    obs, reward, done, info = result
-                    return obs, reward, done, False, info
-                return result
-
-            e.reset = types.MethodType(reset_wrapper, e)
-            e.step = types.MethodType(step_wrapper, e)
-            e._is_patched = True
-
-        # Walk through the environment stack
-        curr = env
-        while curr is not None:
-            patch_single_env(curr)
-            if hasattr(curr, 'env'):
-                curr = curr.env
-            else:
-                break
-        return env
-
-    def reset(self, seed: int = None, options: Dict[str, Any] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Resets the environment to an initial state."""
-        super().reset(seed=seed)
-        obs, info = self.env.reset()
-        return np.array(obs, dtype=np.float32), info
-
-    def step(self, actions: Any) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+    def step(self, actions: Any) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         """Executes one timestep in the environment."""
         if isinstance(actions, np.ndarray):
             actions = actions.tolist()
-            
-        obs, reward, terminated, truncated, info = self.env.step(actions)
-        
+
+        result = self.env.step(actions)
+
+        # GRF step returns (obs, reward, done, info); tolerate 5-tuple builds
+        if len(result) == 4:
+            obs, reward, done, info = result
+        elif len(result) == 5:
+            obs, reward, terminated, truncated, info = result
+            done = terminated or truncated
+        else:
+            raise ValueError(f"Unexpected return from step: {len(result)} items")
+
         obs = np.array(obs, dtype=np.float32)
         team_reward = float(np.sum(reward))
-        
-        return obs, team_reward, terminated, truncated, info
+
+        # Return exactly 4 items expected by older Stable Baselines 3
+        return obs, team_reward, bool(done), info
 
     def render(self):
         """Renders the environment."""
@@ -121,6 +129,9 @@ class SoccerMatchA2C:
     Follows structure similar to the random action baseline.
     """
     def __init__(self, env_name: str = ENV_NAME, num_agents: int = NUM_AGENTS, render: bool = False):
+        self.env_name = env_name
+        self.num_agents = num_agents
+        self.render = render
         self.env = FootballGymEnv(env_name, num_agents, render)
         
         # Initialize A2C model following the style of baseline3.py
@@ -138,30 +149,53 @@ class SoccerMatchA2C:
     def train(self, total_timesteps: int = 10000):
         """Trains the A2C model."""
         print(f"Starting training for {total_timesteps} steps...")
-        self.model.learn(total_timesteps=total_timesteps)
-        
+        reward_callback = EpisodeRewardCallback()
+        train_start = time.time()
+        self.model.learn(
+            total_timesteps=total_timesteps,
+            callback=reward_callback,
+        )
+        train_time_s = time.time() - train_start
+
         model_path = "a2c_11v11_model"
         self.model.save(model_path)
-        print(f"Training finished. Model saved to {model_path}.zip")
+        print(f"Training finished in {train_time_s:.1f}s. Model saved to {model_path}.zip")
+
+        # Run log: shared metadata + per-episode iteration results
+        payload = run_metadata(
+            script="evaluation/baselines/11v11_a2c.py",
+            algo=ALGO,
+            env_name=self.env_name,
+            num_agents=self.num_agents,
+            train_time_s=round(train_time_s, 2),
+            total_timesteps=total_timesteps,
+            timesteps_executed=int(self.model.num_timesteps),
+            episodes=len(reward_callback.episode_rewards),
+            hyperparams=sb3_hyperparams(self.model),
+            observation=obs_snapshot("simple115v2", [self.num_agents, 115], OBS_SIMPLE115V2),
+            episode_rewards=reward_callback.episode_rewards,
+            episode_lengths=reward_callback.episode_lengths,
+        )
+        save_run_log(os.path.join(LOG_DIR, f"{ALGO}_{ENV_NAME}_training_log.json"), payload)
 
     def run(self, max_steps: int = 3000):
         """Evaluates the trained model in the environment."""
         print("Starting match evaluation...")
-        obs, _ = self.env.reset()
-        
+        obs = self.env.reset()
+
         try:
             for step in range(max_steps):
                 # Predict action using the trained model
                 action, _states = self.model.predict(obs, deterministic=True)
-                
-                obs, reward, terminated, truncated, info = self.env.step(action)
-                
+
+                obs, reward, done, info = self.env.step(action)
+
                 if reward != 0:
                     print(f"Step {step:4d} | Team Reward: {reward}")
-                
-                if terminated or truncated:
+
+                if done:
                     print(f"Match ended after {step} steps.")
-                    obs, _ = self.env.reset()
+                    obs = self.env.reset()
                     break
         except KeyboardInterrupt:
             print("\nEvaluation interrupted by user.")

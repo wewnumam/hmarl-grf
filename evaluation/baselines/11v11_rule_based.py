@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # --- Configuration Constants ---
-ENV_NAME = "11_vs_11_stochastic"
+ENV_NAME = "academy_single_goal_versus_lazy"
 NUM_AGENTS = 11
 ACTION_SPACE_SIZE = 19  # 0 to 18
 LOG_DIR = "dumps"
@@ -145,6 +145,11 @@ class SoccerAgent:
         # =====================================================
 
         if state["ball_owned_team"] == 0 and is_ball_owned_by_agent:
+            if agent_position[0] > 0.7:
+                # Shot
+                return 12
+            else:
+                # Dribble toward the goal
                 return 5
 
         # Off possession: execute the role-specific positioning rule.
@@ -387,4 +392,4 @@ class SoccerMatch:
 
 if __name__ == "__main__":
     match = SoccerMatch(render=False, dump=True)
-    match.run(max_steps=3000)
+    match.run(max_steps=2048)
