@@ -18,8 +18,10 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list || true \
 RUN python3 -m pip install --upgrade pip setuptools wheel
 RUN python3 -m pip install psutil
 
+RUN python3 -m pip install opencv-python==4.5.5.64
+
 COPY . /gfootball
-RUN cd /gfootball && python3 -m pip install . || true
+RUN cd /gfootball && python3 -m pip install .
 
 RUN python3 -m pip install stable_baselines3 gymnasium mplsoccer requests dataclasses matplotlib
 

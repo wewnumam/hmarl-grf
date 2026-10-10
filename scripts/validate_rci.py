@@ -814,9 +814,12 @@ def main():
         print("NOTE: Loaded results use seed-level aggregates.")
         print("      For full per-episode correlation, run without --load-results.")
         per_seed = {}
+        # Coordination keys written by stat_test.py for construct-validity pairs
+        COORD_KEYS = ['rci_strict', 'rci_nomove', 'fai_mean', 'positional_entropy',
+                      'compactness_mean', 'psr', 'ppr']
         for alg, res in data.get('results', {}).items():
             per_seed[alg] = {}
-            for key in ['rci', 'win_rates', 'rewards']:
+            for key in ['rci', 'win_rates', 'rewards'] + COORD_KEYS:
                 if key in res:
                     per_seed[alg][key] = res[key]
             # Map common keys

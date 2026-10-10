@@ -1,0 +1,310 @@
+{
+  "script": "evaluation/baselines/ppo_flock_formation.py",
+  "timestamp_utc": "2026-10-10T03:21:01.288180Z",
+  "device": {
+    "torch_device": "cuda",
+    "cuda_available": true,
+    "cuda_version": "10.2",
+    "gpu": "NVIDIA GeForce GTX 1650",
+    "cpu_count": 16,
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-Ubuntu-18.04-bionic"
+  },
+  "versions": {
+    "python": "3.6.9",
+    "numpy": "1.18.1",
+    "torch": "1.10.2+cu102",
+    "stable_baselines3": "1.3.0",
+    "gym": "0.19.0"
+  },
+  "algo": "ppo_flock",
+  "env_name": "11_vs_11_easy_stochastic",
+  "num_agents": 11,
+  "phase": "evaluation",
+  "eval_max_steps": 25000,
+  "eval_episodes_requested": 10,
+  "eval_steps_executed": 25000,
+  "eval_total_reward": -273.0,
+  "learned_parameters": {
+    "w_flock": 2.0,
+    "w_align": 2.0,
+    "w_spacing": 0.339,
+    "shot_prob": 1.0,
+    "tackle_prob": 0.0,
+    "pass_prob": 0.0,
+    "pass_dir": 0.0
+  },
+  "parameter_names": [
+    "w_flock",
+    "w_align",
+    "w_spacing",
+    "shot_prob",
+    "tackle_prob",
+    "pass_prob",
+    "pass_dir"
+  ],
+  "pass_verification": {
+    "window": 10,
+    "reward_left_retains": 1.0,
+    "penalty_right_owns": -1.0
+  },
+  "observation": {
+    "representation": "raw",
+    "shape": [
+      49
+    ],
+    "dtype": "float32",
+    "stacked": false,
+    "description": "hmarl extract_obs_vector (115 float32, zero-padded/truncated): 11 ball block (position xyz, direction xyz, rotation xyz, owned_team, owned_player), 88 = per left-team player x11 (active-flag, xy position, xy direction, tired factor, yellow card, role); right team not included"
+  },
+  "episode_dumps": {
+    "enabled": true,
+    "every_episode": true,
+    "max_kept": 10,
+    "logdir": "dumps"
+  },
+  "football_metrics": {
+    "games": 9,
+    "wins": 0,
+    "draws": 0,
+    "losses": 9,
+    "gf_total": 2,
+    "ga_total": 27,
+    "gd_total": -25,
+    "gf_per_game": 0.222,
+    "ga_per_game": 3.0,
+    "shots": 76,
+    "shots_on_target": 1,
+    "shot_accuracy_pct": 1.32,
+    "passes": 49,
+    "passes_success": 2,
+    "pass_success_pct": 4.08,
+    "possession_pct": 52.08,
+    "total_steps": 25000
+  },
+  "episodes_detail": [
+    {
+      "gf": 0,
+      "ga": 5,
+      "shots": 8,
+      "shots_on_target": 0,
+      "passes": 0,
+      "passes_success": 0,
+      "possession_steps": 1550,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 737,
+          "side": "ga"
+        },
+        {
+          "step": 999,
+          "side": "ga"
+        },
+        {
+          "step": 1582,
+          "side": "ga"
+        },
+        {
+          "step": 2255,
+          "side": "ga"
+        },
+        {
+          "step": 2624,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 0,
+      "ga": 2,
+      "shots": 10,
+      "shots_on_target": 0,
+      "passes": 13,
+      "passes_success": 0,
+      "possession_steps": 1600,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 1062,
+          "side": "ga"
+        },
+        {
+          "step": 1344,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 0,
+      "ga": 3,
+      "shots": 1,
+      "shots_on_target": 0,
+      "passes": 3,
+      "passes_success": 0,
+      "possession_steps": 1523,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 641,
+          "side": "ga"
+        },
+        {
+          "step": 1581,
+          "side": "ga"
+        },
+        {
+          "step": 2376,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 0,
+      "ga": 2,
+      "shots": 7,
+      "shots_on_target": 0,
+      "passes": 9,
+      "passes_success": 2,
+      "possession_steps": 1951,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 1144,
+          "side": "ga"
+        },
+        {
+          "step": 1559,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 0,
+      "ga": 2,
+      "shots": 15,
+      "shots_on_target": 0,
+      "passes": 4,
+      "passes_success": 0,
+      "possession_steps": 1522,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 944,
+          "side": "ga"
+        },
+        {
+          "step": 2408,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 0,
+      "ga": 6,
+      "shots": 0,
+      "shots_on_target": 0,
+      "passes": 0,
+      "passes_success": 0,
+      "possession_steps": 1299,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 334,
+          "side": "ga"
+        },
+        {
+          "step": 1302,
+          "side": "ga"
+        },
+        {
+          "step": 1917,
+          "side": "ga"
+        },
+        {
+          "step": 2057,
+          "side": "ga"
+        },
+        {
+          "step": 2331,
+          "side": "ga"
+        },
+        {
+          "step": 2512,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 1,
+      "ga": 2,
+      "shots": 12,
+      "shots_on_target": 1,
+      "passes": 3,
+      "passes_success": 0,
+      "possession_steps": 1618,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 630,
+          "side": "ga"
+        },
+        {
+          "step": 787,
+          "side": "gf"
+        },
+        {
+          "step": 1762,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 1,
+      "ga": 3,
+      "shots": 23,
+      "shots_on_target": 0,
+      "passes": 17,
+      "passes_success": 0,
+      "possession_steps": 1526,
+      "steps": 3001,
+      "goals_timeline": [
+        {
+          "step": 139,
+          "side": "ga"
+        },
+        {
+          "step": 2121,
+          "side": "gf"
+        },
+        {
+          "step": 2632,
+          "side": "ga"
+        },
+        {
+          "step": 2733,
+          "side": "ga"
+        }
+      ]
+    },
+    {
+      "gf": 0,
+      "ga": 2,
+      "shots": 0,
+      "shots_on_target": 0,
+      "passes": 0,
+      "passes_success": 0,
+      "possession_steps": 432,
+      "steps": 992,
+      "goals_timeline": [
+        {
+          "step": 150,
+          "side": "ga"
+        },
+        {
+          "step": 970,
+          "side": "ga"
+        }
+      ]
+    }
+  ]
+}

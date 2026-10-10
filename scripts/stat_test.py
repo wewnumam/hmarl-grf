@@ -393,6 +393,10 @@ def main():
         seed_win_rates = []
         seed_rewards = []
         seed_rci = []
+        # Keys consumed by validate_rci.py --load-results (construct validity pairs)
+        SEED_KEYS = ['rci_strict', 'rci_nomove', 'fai_mean', 'positional_entropy',
+                     'compactness_mean', 'psr', 'ppr']
+        seed_extra = {k: [] for k in SEED_KEYS}
 
         seed_prog = ProgressTracker(args.seeds, f"Seeds ({alg.upper()})")
         for s in range(args.seeds):
@@ -410,8 +414,14 @@ def main():
                     metrics = evaluate_flat(alg, args.eval_episodes, seed + 1000, model_path=ckpt)
 
                 seed_win_rates.append(metrics.get('win_rate', 0))
-                seed_rewards.append(metrics.get('avg_reward', 0) if 'avg_reward' in metrics else 0)
+                # compute_all_metrics returns 'cumulative_reward'; random returns 'avg_reward'
+                seed_rewards.append(metrics.get('cumulative_reward',
+                                                 metrics.get('avg_reward', 0)))
                 seed_rci.append(metrics.get('rci_cat', 0) if 'rci_cat' in metrics else 0)
+                for k in SEED_KEYS:
+                    v = metrics.get(k)
+                    if isinstance(v, (int, float)):
+                        seed_extra[k].append(float(v))
 
                 print(f"\n    WR: {metrics.get('win_rate', 0):.1f}% | "
                       f"GD: {metrics.get('goal_difference', 'N/A')} | "
@@ -430,6 +440,10 @@ def main():
                 'rewards': seed_rewards,
                 'rci': seed_rci,
             }
+            # Per-seed coordination metrics for validate_rci.py --load-results
+            for k, vals in seed_extra.items():
+                if vals:
+                    all_results[alg][k] = vals
 
             if alg == "hmarl":
                 hmarl_win_rates = seed_win_rates
