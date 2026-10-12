@@ -775,6 +775,7 @@ def plot_ablation_study(
     data: Dict[str, float],
     output_path: str,
     title: str = 'Ablation Study — RCI Contribution by Hierarchy Level',
+    xlabel: str = 'Win Rate (%)',
 ):
     """Horizontal bar chart: metric value with each component disabled.
 
@@ -804,7 +805,7 @@ def plot_ablation_study(
 
     ax.set_yticks(range(n))
     ax.set_yticklabels(configs)
-    ax.set_xlabel('Win Rate (%)')
+    ax.set_xlabel(xlabel)
     ax.invert_yaxis()  # Highest value on top
 
     # Reference line for full model
@@ -817,7 +818,11 @@ def plot_ablation_study(
         ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2,
                f'{val:.3f}', va='center', fontsize=9)
 
-    ax.set_xlim(0, max(values) * 1.15 if values else 1.0)
+    # Cover negative values too — otherwise value labels fall outside the
+    # axes and bbox_inches='tight' inflates the figure enormously.
+    xmin = min(0.0, min(values) * 1.15) if values else 0.0
+    xmax = max(values) * 1.15 if values and max(values) > 0 else max(1.0, -xmin)
+    ax.set_xlim(xmin, xmax)
     fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
@@ -972,6 +977,12 @@ def plot_reward_breakdown(
 
     if min_len == float('inf') or min_len == 0:
         print('No reward data for breakdown plot')
+        plt.close(fig)
+        return
+
+    if all(np.all(d == 0) for d in all_data if len(d) > 0):
+        print('Reward components are all zero — skipping breakdown plot '
+              '(re-run eval.py to regenerate reward_components.json)')
         plt.close(fig)
         return
 

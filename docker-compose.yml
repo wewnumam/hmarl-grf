@@ -1,7 +1,7 @@
 services:
   gfootball:
     image: gfootball
-    container_name: gfootball-dev
+    container_name: ${CONTAINER_NAME:-gfootball-dev}
     stdin_open: true
     tty: true
     working_dir: /gfootball

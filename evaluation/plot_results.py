@@ -158,13 +158,34 @@ def generate_plots_from_results(
         ablation_flat = {}
         for name, metrics in summary.items():
             if isinstance(metrics, dict):
-                ablation_flat[name] = metrics.get('win_rate', 0.0)
+                wr = metrics.get('win_rate')
+                if wr is None:  # tolerate {'eval': {'win_rate': ...}} nesting
+                    wr = metrics.get('eval', {}).get('win_rate')
+                ablation_flat[name] = wr
             else:
                 ablation_flat[name] = metrics  # already scalar
+        ablation_flat = {k: v for k, v in ablation_flat.items() if v is not None}
+        ablation_xlabel = 'Win Rate (%)'
+        # All-zero win rates (no wins in any eval episode) make a blank
+        # chart — fall back to avg_reward so the figure stays informative.
+        if ablation_flat and max(ablation_flat.values()) == 0:
+            reward_flat = {}
+            for name, metrics in summary.items():
+                if isinstance(metrics, dict):
+                    ar = metrics.get('avg_reward',
+                                     metrics.get('eval', {}).get('avg_reward'))
+                    if ar is not None:
+                        reward_flat[name] = ar
+                else:
+                    reward_flat[name] = metrics
+            if reward_flat and any(v != 0 for v in reward_flat.values()):
+                ablation_flat = reward_flat
+                ablation_xlabel = 'Average Reward'
         if ablation_flat:
             plot_ablation_study(
                 ablation_flat,
                 os.path.join(output_dir, '09_ablation.png'),
+                xlabel=ablation_xlabel,
             )
 
     # --- 10. Tactic Transitions ---
