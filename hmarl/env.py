@@ -1,10 +1,29 @@
 """Base GRF environment wrapper with state extraction for hierarchical MARL."""
 
+import atexit
 import types
+import weakref
 from typing import Any, Dict, List, Tuple
 
 import gfootball.env as football_env
 import numpy as np
+
+# GRF's FootballEnvCore.__del__ -> close() -> _unused_engines.append(...);
+# at interpreter shutdown that module global is already None -> AttributeError
+# ('NoneType' object has no attribute 'append') for any env not explicitly
+# closed. Close stragglers here, while globals are still intact.
+_open_envs = weakref.WeakSet()
+
+
+def _close_open_envs():
+    for env in list(_open_envs):
+        try:
+            env.close()
+        except Exception:
+            pass
+
+
+atexit.register(_close_open_envs)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -139,7 +158,7 @@ def create_raw_env(
     write_dumps: bool = False,
 ) -> Any:
     """Create GRF environment with raw representation."""
-    return football_env.create_environment(
+    env = football_env.create_environment(
         env_name=env_name,
         representation="raw",
         number_of_left_players_agent_controls=num_agents,
@@ -148,6 +167,8 @@ def create_raw_env(
         write_full_episode_dumps=write_dumps,
         render=render,
     )
+    _open_envs.add(env)
+    return env
 
 
 def create_simple_env(
@@ -158,7 +179,7 @@ def create_simple_env(
     write_dumps: bool = False,
 ) -> Any:
     """Create GRF environment with simple115v2 representation."""
-    return football_env.create_environment(
+    env = football_env.create_environment(
         env_name=env_name,
         representation="simple115v2",
         number_of_left_players_agent_controls=num_agents,
@@ -167,6 +188,8 @@ def create_simple_env(
         write_full_episode_dumps=write_dumps,
         render=render,
     )
+    _open_envs.add(env)
+    return env
 
 
 # ---------------------------------------------------------------------------
