@@ -304,6 +304,8 @@ def evaluate_random(num_episodes: int, seed: int) -> Dict:
 
     match_results = []
     all_rewards = []
+    all_goals_for = []
+    all_goals_against = []
 
     for ep in range(num_episodes):
         obs = env.reset()
@@ -327,10 +329,13 @@ def evaluate_random(num_episodes: int, seed: int) -> Dict:
         score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
+        all_goals_for.append(gf)
+        all_goals_against.append(ga)
         all_rewards.append(ep_reward)
 
     env.close()
-    return {'win_rate': compute_win_rate(match_results), 'avg_reward': float(np.mean(all_rewards))}
+    return {'win_rate': compute_win_rate(match_results), 'avg_reward': float(np.mean(all_rewards)),
+            'goal_difference': compute_goal_difference(all_goals_for, all_goals_against)}
 
 
 def run_statistical_test(hmarl_values: List[float], baseline_values: List[float],
@@ -344,6 +349,12 @@ def run_statistical_test(hmarl_values: List[float], baseline_values: List[float]
 
     if len(hmarl_values) < 2 or len(baseline_values) < 2:
         result['test'] = 'skipped (need >= 2 seeds)'
+        return result
+
+    if len(set(hmarl_values + baseline_values)) == 1:
+        result['test'] = 'degenerate (all values identical across both groups — no variance to test)'
+        result['p_value'] = 1.0
+        result['significant'] = False
         return result
 
     try:
@@ -383,6 +394,7 @@ def main():
 
     all_results = {}
     hmarl_win_rates = []
+    hmarl_gds = []
     main_start = time.time()
 
     for alg in args.algorithms:
@@ -393,6 +405,7 @@ def main():
         seed_win_rates = []
         seed_rewards = []
         seed_rci = []
+        seed_gd = []
         # Keys consumed by validate_rci.py --load-results (construct validity pairs)
         SEED_KEYS = ['rci_strict', 'rci_nomove', 'fai_mean', 'positional_entropy',
                      'compactness_mean', 'psr', 'ppr']
@@ -414,6 +427,7 @@ def main():
                     metrics = evaluate_flat(alg, args.eval_episodes, seed + 1000, model_path=ckpt)
 
                 seed_win_rates.append(metrics.get('win_rate', 0))
+                seed_gd.append(metrics.get('goal_difference', 0))
                 # compute_all_metrics returns 'cumulative_reward'; random returns 'avg_reward'
                 seed_rewards.append(metrics.get('cumulative_reward',
                                                  metrics.get('avg_reward', 0)))
@@ -437,6 +451,9 @@ def main():
                 'win_rates': seed_win_rates,
                 'win_rate_mean': float(np.mean(seed_win_rates)),
                 'win_rate_std': float(np.std(seed_win_rates)),
+                'goal_differences': seed_gd,
+                'goal_difference_mean': float(np.mean(seed_gd)),
+                'goal_difference_std': float(np.std(seed_gd)),
                 'rewards': seed_rewards,
                 'rci': seed_rci,
             }
@@ -447,23 +464,26 @@ def main():
 
             if alg == "hmarl":
                 hmarl_win_rates = seed_win_rates
+                hmarl_gds = seed_gd
 
     # Statistical tests
     print(f"\n{'='*60}")
-    print(f"  STATISTICAL TESTS (HMARL vs baselines)")
+    print(f"  STATISTICAL TESTS (HMARL vs baselines, Mann-Whitney U on goal difference)")
     print(f"{'='*60}")
 
     stat_tests = []
-    if hmarl_win_rates:
+    if hmarl_gds:
         for alg, res in all_results.items():
             if alg == "hmarl":
                 continue
-            baseline_wrs = res.get('win_rates', [])
-            test_result = run_statistical_test(hmarl_win_rates, baseline_wrs, alg)
+            baseline_gds = res.get('goal_differences', [])
+            test_result = run_statistical_test(hmarl_gds, baseline_gds, alg)
             stat_tests.append(test_result)
             print(f"\n  HMARL vs {alg}:")
-            print(f"    HMARL WR: {np.mean(hmarl_win_rates):.1f}% ± {np.std(hmarl_win_rates):.1f}%")
-            print(f"    {alg} WR: {np.mean(baseline_wrs):.1f}% ± {np.std(baseline_wrs):.1f}%")
+            print(f"    HMARL WR: {res.get('win_rate_mean', 0):.1f}% ± {res.get('win_rate_std', 0):.1f}% | "
+                  f"GD: {np.mean(hmarl_gds):.1f} ± {np.std(hmarl_gds):.1f}")
+            print(f"    {alg} WR: {res.get('win_rate_mean', 0):.1f}% ± "
+                  f"{res.get('win_rate_std', 0):.1f}% | GD: {np.mean(baseline_gds):.1f} ± {np.std(baseline_gds):.1f}")
             if 'p_value' in test_result:
                 sig = "YES" if test_result['significant'] else "NO"
                 print(f"    p-value: {test_result['p_value']:.4f} (significant: {sig})")
