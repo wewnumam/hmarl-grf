@@ -18,6 +18,21 @@ import time
 import traceback
 from pathlib import Path
 
+# Import OBS_DIM and other constants
+from hmarl.utils import OBS_DIM, ACTION_SPACE_SIZE
+from hmarl.policy import SUBGOAL_EMBED_DIM
+
+# Import classes needed for tests
+from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding
+from hmarl.expert import ExpertPolicyAllAgents
+from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker
+from hmarl.metrics import (
+    compute_win_rate, compute_goal_difference, team_compactness,
+    formation_adherence_index
+)
+from hmarl.rci import compute_rci
+from hmarl.env import extract_game_state, get_action_category, ACTION_CATEGORIES
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
