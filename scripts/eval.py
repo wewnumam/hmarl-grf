@@ -105,7 +105,7 @@ def _extract_dict_from_simple(obs):
 
 
 def get_obs_vector(obs_or_state, player_idx):
-    """Extract 115-dim observation vector from raw dict."""
+    """Extract fixed-dim observation vector (OBS_DIM) from raw dict."""
     # GRF raw obs is list[dict], take first element
     if isinstance(obs_or_state, list) and len(obs_or_state) > 0 and isinstance(obs_or_state[0], dict):
         game_state = obs_or_state[0]

@@ -30,10 +30,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from hmarl.utils import set_seed, extract_obs_vector, build_centralized_obs, load_ckpt
+from hmarl.utils import set_seed, extract_obs_vector, build_centralized_obs, load_ckpt, OBS_DIM
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 
-OBS_DIM = 115
 HIDDEN_DIM = 256
 ACTION_SPACE_SIZE = 19
 GAMMA = 0.99

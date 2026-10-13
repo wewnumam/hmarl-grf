@@ -24,7 +24,7 @@ import torch
 
 from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
 from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
-from hmarl.expert import ExpertPolicyAllAgents
+from hmarl.expert import ExpertPolicyAllAgents, ExpertPolicyEval
 from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward
 from hmarl.metrics import compute_win_rate, compute_goal_difference, compute_all_metrics, print_metrics
 from hmarl.rci import compute_rci
@@ -99,9 +99,12 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
     env = create_raw_env(render=False)
     controller = HierarchicalController()
     expert = ExpertPolicyAllAgents()
+    # Anti-circularity: RCI reference = detuned expert (same as scripts/eval.py)
+    expert.policy = ExpertPolicyEval()
 
     match_results = []
     all_rewards = []
+    all_game_rewards = []  # game-only (GRF) reward per episode — comparable across algorithms
     all_actual = []
     all_ideal = []
     all_states = []
@@ -116,6 +119,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
         rci_tracker = RCITracker(NUM_AGENTS)
         ball_prog_tracker = BallProgressionTracker()
         ep_reward = 0.0
+        ep_game_reward = 0.0
         ep_actual = []
         ep_ideal = []
         ep_states = []
@@ -145,6 +149,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
             else:
                 obs_raw, reward, done, info = step_result
             team_reward = float(np.sum(reward))
+            ep_game_reward += team_reward
             new_gs = extract_game_state(obs_raw)
             pass_tracker.update(new_gs, prev_gs)
             total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker, ball_progression_tracker=ball_prog_tracker)
@@ -160,6 +165,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)
+        all_game_rewards.append(ep_game_reward)
         all_actual.extend(ep_actual)
         all_ideal.extend(ep_ideal)
         all_states.extend(ep_states)
@@ -173,6 +179,7 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
                                   cumulative_reward=sum(all_rewards))
     metrics['win_rate'] = compute_win_rate(match_results)
     metrics['goal_difference'] = compute_goal_difference(all_goals_for, all_goals_against)
+    metrics['avg_game_reward'] = float(np.mean(all_game_rewards))
     return metrics
 
 
@@ -216,8 +223,11 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str 
 
     controller = HierarchicalController()
     expert = ExpertPolicyAllAgents()
+    # Anti-circularity: RCI reference = detuned expert (same as scripts/eval.py)
+    expert.policy = ExpertPolicyEval()
     all_match_results = []
     all_rewards = []
+    all_game_rewards = []  # game-only (GRF) reward per episode
     all_actual = []
     all_ideal = []
     all_states = []
@@ -234,6 +244,7 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str 
         ball_prog_tracker = BallProgressionTracker()
         done = False
         ep_reward = 0.0
+        ep_game_reward = 0.0
         ep_actual = []
         ep_ideal = []
         ep_states = []
@@ -260,6 +271,7 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str 
             else:
                 obs_raw, reward, done, info = step_result
             team_reward = float(np.sum(reward))
+            ep_game_reward += team_reward
             new_gs = extract_game_state(obs_raw)
             pass_tracker.update(new_gs, prev_gs)
             total_r, _ = compute_hierarchical_reward(team_reward, new_gs, joint_actions, ideal, pass_tracker, rci_tracker, ball_progression_tracker=ball_prog_tracker)
@@ -276,6 +288,7 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str 
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         all_match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_rewards.append(ep_reward)
+        all_game_rewards.append(ep_game_reward)
         all_actual.extend(ep_actual)
         all_ideal.extend(ep_ideal)
         all_states.extend(ep_states)
@@ -291,30 +304,42 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str 
                                   cumulative_reward=sum(all_rewards))
     metrics['win_rate'] = compute_win_rate(all_match_results)
     metrics['goal_difference'] = compute_goal_difference(all_goals_for, all_goals_against)
+    metrics['avg_game_reward'] = float(np.mean(all_game_rewards))
     return metrics
 
 
 
 
 def evaluate_random(num_episodes: int, seed: int) -> Dict:
-    """Evaluate random baseline."""
+    """Evaluate random baseline (same metric pipeline as trained agents)."""
     import random
     set_seed(seed)
     env = create_raw_env(render=False)
+    controller = HierarchicalController()
+    expert = ExpertPolicyAllAgents()
+    # Anti-circularity: RCI reference = detuned expert (same as scripts/eval.py)
+    expert.policy = ExpertPolicyEval()
 
     match_results = []
-    all_rewards = []
+    all_game_rewards = []
+    all_actual = []
+    all_ideal = []
+    all_states = []
     all_goals_for = []
     all_goals_against = []
 
     for ep in range(num_episodes):
         obs = env.reset()
         obs_raw = obs[0] if isinstance(obs, tuple) else obs
+        game_state = extract_game_state(obs_raw)
         done = False
-        ep_reward = 0.0
+        ep_game_reward = 0.0
         step = 0
 
         while not done and step < EPISODE_MAX_STEPS:
+            macro = controller.get_macro_strategy(game_state)
+            sub_goals = controller.get_sub_goals(game_state, macro)
+            ideal = expert.get_ideal_actions(game_state, sub_goals, macro)
             joint_actions = [random.randint(0, 18) for _ in range(11)]
             step_result = env.step(joint_actions)
             if len(step_result) == 5:
@@ -322,20 +347,29 @@ def evaluate_random(num_episodes: int, seed: int) -> Dict:
                 done = terminated or truncated
             else:
                 obs_raw, reward, done, info = step_result
-            ep_reward += float(np.sum(reward))
+            ep_game_reward += float(np.sum(reward))
+            game_state = extract_game_state(obs_raw)
+            all_actual.append(joint_actions)
+            all_ideal.append(ideal)
+            all_states.append(game_state)
             step += 1
 
-        game_state = extract_game_state(obs_raw)
         score = game_state.get('score', [0, 0])
         gf, ga = (score[0], score[1]) if isinstance(score, (list, tuple)) and len(score) >= 2 else (0, 0)
         match_results.append('win' if gf > ga else ('loss' if gf < ga else 'draw'))
         all_goals_for.append(gf)
         all_goals_against.append(ga)
-        all_rewards.append(ep_reward)
+        all_game_rewards.append(ep_game_reward)
 
     env.close()
-    return {'win_rate': compute_win_rate(match_results), 'avg_reward': float(np.mean(all_rewards)),
-            'goal_difference': compute_goal_difference(all_goals_for, all_goals_against)}
+    metrics = compute_all_metrics(all_actual, all_states, all_ideal,
+                                  goals_for=sum(all_goals_for),
+                                  goals_against=sum(all_goals_against),
+                                  cumulative_reward=sum(all_game_rewards))
+    metrics['win_rate'] = compute_win_rate(match_results)
+    metrics['goal_difference'] = compute_goal_difference(all_goals_for, all_goals_against)
+    metrics['avg_game_reward'] = float(np.mean(all_game_rewards))
+    return metrics
 
 
 def run_statistical_test(hmarl_values: List[float], baseline_values: List[float],
@@ -382,6 +416,11 @@ def main():
     parser.add_argument("--output", type=str, default="evaluation_results/stat_test_results.json")
     parser.add_argument("--quick", action="store_true",
                         help="Quick mode: 100k steps, 10 eval episodes")
+    parser.add_argument("--eval-only", action="store_true",
+                        help="Skip training; evaluate --model-path per eval seed "
+                             "(seeds vary the environment rollouts, not training)")
+    parser.add_argument("--model-path", type=str, default="checkpoints/hmarl_model.pt",
+                        help="Checkpoint for --eval-only (hmarl)")
     args = parser.parse_args()
 
     if args.quick:
@@ -418,19 +457,30 @@ def main():
 
             try:
                 if alg == "hmarl":
-                    ckpt = train_hmarl(args.timesteps, seed, f"stat_temp/{alg}_{s}")
-                    metrics = evaluate_hmarl_from_checkpoint(ckpt, args.eval_episodes, seed + 1000)
+                    if args.eval_only:
+                        if not os.path.exists(args.model_path):
+                            raise FileNotFoundError(
+                                f"--eval-only needs an existing checkpoint: {args.model_path}")
+                        metrics = evaluate_hmarl_from_checkpoint(
+                            args.model_path, args.eval_episodes, seed + 1000)
+                    else:
+                        ckpt = train_hmarl(args.timesteps, seed, f"stat_temp/{alg}_{s}")
+                        metrics = evaluate_hmarl_from_checkpoint(ckpt, args.eval_episodes, seed + 1000)
                 elif alg == "random":
                     metrics = evaluate_random(args.eval_episodes, seed)
+                elif args.eval_only:
+                    print(f"    WARNING: --eval-only not supported for {alg} (no checkpoint); skipping")
+                    continue
                 else:
                     ckpt = train_flat(alg, args.timesteps, seed, f"stat_temp/{alg}_{s}")
                     metrics = evaluate_flat(alg, args.eval_episodes, seed + 1000, model_path=ckpt)
 
                 seed_win_rates.append(metrics.get('win_rate', 0))
                 seed_gd.append(metrics.get('goal_difference', 0))
-                # compute_all_metrics returns 'cumulative_reward'; random returns 'avg_reward'
-                seed_rewards.append(metrics.get('cumulative_reward',
-                                                 metrics.get('avg_reward', 0)))
+                # Uniform metric across algorithms: GRF game-only reward per episode.
+                # (Old bug: hmarl reported shaped cumulative_reward vs random's
+                # avg_game_reward — incomparable scales.)
+                seed_rewards.append(metrics.get('avg_game_reward', 0))
                 seed_rci.append(metrics.get('rci_cat', 0) if 'rci_cat' in metrics else 0)
                 for k in SEED_KEYS:
                     v = metrics.get(k)
@@ -473,6 +523,7 @@ def main():
 
     stat_tests = []
     if hmarl_gds:
+        hmarl_res = all_results.get('hmarl', {})
         for alg, res in all_results.items():
             if alg == "hmarl":
                 continue
@@ -480,7 +531,10 @@ def main():
             test_result = run_statistical_test(hmarl_gds, baseline_gds, alg)
             stat_tests.append(test_result)
             print(f"\n  HMARL vs {alg}:")
-            print(f"    HMARL WR: {res.get('win_rate_mean', 0):.1f}% ± {res.get('win_rate_std', 0):.1f}% | "
+            # NOTE (fixed 2026-10-13): these two lines used to print `res`
+            # (the baseline) for BOTH rows; HMARL row now uses hmarl_res.
+            print(f"    HMARL WR: {hmarl_res.get('win_rate_mean', 0):.1f}% ± "
+                  f"{hmarl_res.get('win_rate_std', 0):.1f}% | "
                   f"GD: {np.mean(hmarl_gds):.1f} ± {np.std(hmarl_gds):.1f}")
             print(f"    {alg} WR: {res.get('win_rate_mean', 0):.1f}% ± "
                   f"{res.get('win_rate_std', 0):.1f}% | GD: {np.mean(baseline_gds):.1f} ± {np.std(baseline_gds):.1f}")
@@ -502,6 +556,11 @@ def main():
             'timesteps': args.timesteps,
             'eval_episodes': args.eval_episodes,
             'base_seed': args.base_seed,
+            'eval_only': args.eval_only,
+            'model_path': args.model_path if args.eval_only else None,
+            'note': ('eval_only: seeds vary environment rollouts on ONE checkpoint, '
+                     'not independent training runs' if args.eval_only else
+                     'seeds = independent training runs'),
         },
         'results': all_results,
         'statistical_tests': stat_tests,

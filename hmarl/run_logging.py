@@ -32,10 +32,11 @@ OBS_SIMPLE115V2 = (
 )
 # hmarl.utils.extract_obs_vector (custom vector from raw game_state)
 OBS_HMARL_115 = (
-    "hmarl extract_obs_vector (115 float32, zero-padded/truncated): "
+    "hmarl extract_obs_vector v2 (165 float32, zero-padded/truncated): "
     "11 ball block (position xyz, direction xyz, rotation xyz, owned_team, owned_player), "
     "88 = per left-team player x11 (active-flag, xy position, xy direction, tired factor, "
-    "yellow card, role); right team not included"
+    "yellow card, role), 66 = per right-team player x11 (xy position, xy direction, "
+    "active flag, role)"
 )
 
 

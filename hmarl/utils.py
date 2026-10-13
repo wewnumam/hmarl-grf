@@ -22,7 +22,10 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Constants (single source of truth)
 # ---------------------------------------------------------------------------
-OBS_DIM = 115
+# v2 (2026-10-13): 165 = 11 ball + 88 left-team (8 feat x11) + 66 right-team
+# (6 feat x11). v1 was 115 and excluded the right team entirely — the policy
+# was blind to all 11 opponents (root cause of 0% win rate diagnosis).
+OBS_DIM = 165
 HIDDEN_DIM = 256
 HEAD_DIM = 128
 ACTION_SPACE_SIZE = 19
@@ -75,6 +78,23 @@ def extract_obs_vector(game_state: Dict, player_idx: int,
         features.extend(d)
         features.append(t)
         features.append(float(y))
+        features.append(float(r))
+
+    # Right team (opponents) — v2: policy must see opponents. Without this
+    # block the agent cannot judge pressure, passing lanes, or shooting
+    # windows (see OBS_DIM note above). 6 features/player: x, y, dx, dy,
+    # active, role = 66 total -> OBS_DIM 165.
+    right_team = game_state.get('right_team', [])
+    for i in range(min(11, len(right_team))):
+        features.extend(right_team[i])
+        d = game_state.get('right_team_direction', [[0, 0]] * 11)[i] \
+            if 'right_team_direction' in game_state else [0, 0]
+        features.extend(d)
+        a = game_state.get('right_team_active', [1] * 11)[i] \
+            if 'right_team_active' in game_state else 1
+        r = game_state.get('right_team_roles', [5] * 11)[i] \
+            if 'right_team_roles' in game_state else 5
+        features.append(float(a))
         features.append(float(r))
 
     features = features[:obs_dim]

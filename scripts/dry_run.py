@@ -276,7 +276,7 @@ def layer2_components():
         # Add initial transitions
         for _ in range(32):
             buf.add_transition(
-                obs=np.random.randn(115).astype(np.float32),
+                obs=np.random.randn(OBS_DIM).astype(np.float32),
                 subgoal_embed=np.random.randn(16).astype(np.float32),
                 action=np.random.randint(0, 19),
                 log_prob=-1.0,
@@ -286,7 +286,7 @@ def layer2_components():
         buf.start_timestep()
         for _ in range(11):
             buf.add_transition(
-                obs=np.random.randn(115).astype(np.float32),
+                obs=np.random.randn(OBS_DIM).astype(np.float32),
                 subgoal_embed=np.random.randn(16).astype(np.float32),
                 action=np.random.randint(0, 19),
                 log_prob=-1.0,
@@ -641,28 +641,40 @@ def layer2c_script_tests():
         gs['ball'] = [0.0, 0.0, 0.0]
 
         # All components on
-        reward_fn = make_custom_reward(alpha_h=1.0, alpha_m=1.0, alpha_l=1.0,
-                                       use_fai=True, use_ppr=True, use_rci=True)
+        reward_fn = make_custom_reward(
+            alpha_h=1.0, alpha_m=1.0, alpha_l=1.0, alpha_prog=1.0, alpha_gk=1.0,
+            game_scale=1.0, enable_fai=True, enable_ppr=True, enable_rci=True,
+            enable_gk_penalty=True
+        )
         pt = PassTracker()
         rt = RCITracker(11)
+        bpt = BallProgressionTracker()
         actual = [5]*11
         ideal = [5]*11
-        total, breakdown = reward_fn(1.0, gs, actual, ideal, pt, rt)
+        total, breakdown = reward_fn(1.0, gs, actual, ideal, pt, rt, ball_progression_tracker=bpt)
         assert isinstance(total, float)
         assert 'fai' in breakdown
         assert 'ppr' in breakdown
         assert 'rci_avg' in breakdown
+        assert 'r_progression' in breakdown
+        assert 'r_gk_penalty' in breakdown
 
         # All components off
-        reward_fn_off = make_custom_reward(alpha_h=0.0, alpha_m=0.0, alpha_l=0.0,
-                                           use_fai=False, use_ppr=False, use_rci=False)
+        reward_fn_off = make_custom_reward(
+            alpha_h=0.0, alpha_m=0.0, alpha_l=0.0, alpha_prog=0.0, alpha_gk=0.0,
+            game_scale=1.0, enable_fai=False, enable_ppr=False, enable_rci=False,
+            enable_gk_penalty=False
+        )
         pt2 = PassTracker()
         rt2 = RCITracker(11)
-        total2, breakdown2 = reward_fn_off(1.0, gs, actual, ideal, pt2, rt2)
+        bpt2 = BallProgressionTracker()
+        total2, breakdown2 = reward_fn_off(1.0, gs, actual, ideal, pt2, rt2, ball_progression_tracker=bpt2)
         assert total2 == 1.0, f"expected game_reward only, got {total2}"
         assert breakdown2['fai'] == 0.0
         assert breakdown2['ppr'] == 0.0
         assert breakdown2['rci_avg'] == 0.0
+        assert breakdown2['r_progression'] == 0.0
+        assert breakdown2['r_gk_penalty'] == 0.0
     check("ablation.make_custom_reward", test_make_custom_reward)
 
     # -- ablation.py: import check --
@@ -904,6 +916,8 @@ def _make_mock_game_state():
             [-0.3, 0.35], [-0.5, 0.0],
         ],
         'right_team_roles': [0, 1, 1, 2, 3, 4, 5, 5, 6, 7, 9],
+        'right_team_direction': [[0, 0]] * 11,
+        'right_team_tired_factor': [0.0] * 11,
         'steps_left': 3000,
         'score': [0, 0],
         'game_mode': 0,

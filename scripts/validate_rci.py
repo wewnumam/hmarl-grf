@@ -303,7 +303,7 @@ def sensitivity_analysis(
         DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Load trained HMARL model
-        ckpt_path = "dumps/hmarl_model.pt"
+        ckpt_path = "checkpoints/hmarl_model.pt"
         if not os.path.exists(ckpt_path):
             return {
                 'status': 'skipped',
@@ -787,7 +787,7 @@ def main():
                         help="Load pre-computed stat_test results instead of running")
     parser.add_argument("--sensitivity", action="store_true",
                         help="Also run sensitivity analysis")
-    parser.add_argument("--model-path", type=str, default="dumps/hmarl_model.pt",
+    parser.add_argument("--model-path", type=str, default="checkpoints/hmarl_model.pt",
                         help="Path to trained HMARL checkpoint for sensitivity")
     parser.add_argument("--quick", action="store_true",
                         help="Quick mode: fewer steps/episodes")

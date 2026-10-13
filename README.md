@@ -312,6 +312,18 @@ python scripts/diagnose_expert.py --episodes 5 --output evaluation_results/exper
 
 **Test:** `rci_nomove` — if its entropy/compactness correlations flip negative, the confound hypothesis holds; if they stay positive, the "coherent = compact" intuition itself is wrong. Discrimination vs random passed (p=0.022) in the same run, and rci_cat ↔ FAI r=0.906 confirms low novelty (redundancy RED threshold >0.8).
 
+### Issue 7: Observation Blind to Opponents + Zero Dense Gradient (2026-10-13, FIXED)
+
+**Symptom:** 3M-step training produced 1 goal total (1000 episodes); eval WR 0%, GF 0, GA 942. Policy entropy 2.86 after 3M steps (uniform-19 = 2.94); policy loss ~−0.002; checkpoint vs fresh-init L1(p)=0.34 with 0/11 argmax agreement — weights moved only via noise, not learning.
+
+**Root cause 1 — observation:** `extract_obs_vector` (v1, 115-dim) contained ball + left team only. The policy was blind to all 11 opponents: it could not judge pressure, passing lanes, or shooting windows. Fixed: v2 (165-dim) adds a right-team block (x, y, dx, dy, active, role per player).
+
+**Root cause 2 — reward:** every per-step reward term was action-independent or near-zero: `r_high = α_H·ρ_fa` ≈ 0.042/step constant (formation level, not delta); `r_prog` fired only on Δx > 0.02 while typical per-step Δx ≈ 0.005, so `episode_r_progression` ≈ 0.004/episode. With all advantages ≈ 0, PPO had nothing to learn from. Fixed: progression reward is now potential-based (φ = ball_x · [we own the ball], r = clip(Δφ, ±0.1), α_P = 0.5) — dense on every possessed step, penalises turnovers via the φ drop, provably policy-neutral (Ng et al. 1999).
+
+**Eval artifact (documented, not fixed):** eval uses `argmax` (`scripts/eval.py:226`) while training samples from Categorical. With near-uniform logits (argmax margin 0.018) argmax latches onto a random direction — the "top_left 49%" in eval action distributions was an artifact of the untrained policy, not learned behaviour.
+
+**Compatibility:** checkpoints trained with OBS_DIM=115 do NOT load into the v2 code (state-dict size mismatch). All pre-2026-10-13 results (`evaluation_results/*`, `dumps/training_log.json`, ablation, stat_test, rci_validity) correspond to the blind-obs policy and are superseded by the retrain.
+
 ### Issue 4: Reward Dominated by Shaping (~99%)
 
 **Symptom:** Episode rewards range 160–570. Game reward (goals ±1) contributes ~2–4. Shaping (FAI + RCI + prog) contributes ~350–380.
@@ -768,7 +780,7 @@ python scripts/validate_rci.py --quick
 python scripts/validate_rci.py --load-results evaluation_results/stat_test_results.json
 
 # Include sensitivity analysis (requires trained model checkpoint)
-python scripts/validate_rci.py --sensitivity --model-path dumps/hmarl_model.pt
+python scripts/validate_rci.py --sensitivity --model-path checkpoints/hmarl_model.pt
 
 # Test specific algorithms
 python scripts/validate_rci.py --algorithms hmarl ippo shppo random

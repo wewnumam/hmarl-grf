@@ -294,7 +294,7 @@ class HMARLTrainer:
         self.episode_count = 0
 
     def _get_obs_vector(self, game_state: Dict, player_idx: int) -> np.ndarray:
-        """Extract 115-dim observation vector (delegates to hmarl.utils)."""
+        """Extract observation vector (delegates to hmarl.utils)."""
         return _extract_obs_util(game_state, player_idx, OBS_DIM)
 
     def _get_subgoal_embed(self, sub_goal: int) -> np.ndarray:

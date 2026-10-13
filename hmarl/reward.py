@@ -5,8 +5,9 @@ Implements:
 - Progressive Pass Ratio (PPR) - r_mid
 - Role Coherence Index (RCI) - r_low (component, not full metric)
 - Ball Progression Reward - r_progression (dense forward-progress signal)
+- GK Positional Penalty - r_gk (penalise goalkeeper leaving the box)
 
-Combined reward: R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t) + α_P·progression(t)
+Combined reward: R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t) + α_P·progression(t) + gk_penalty(t)
 """
 
 from typing import Dict, List, Tuple, Optional
@@ -26,13 +27,20 @@ from hmarl.policy import (
     HighLevelPolicy, MidLevelPolicy, NUM_SUBGOALS,
 )
 
-# Reward coefficients (Opsi A + Lose Penalty, 2026-10-05)
-# Tuned to reduce shaping dominance: shaping was ~99% of total reward
-# New balance: shaping ~62%, game reward ~33% per episode
-ALPHA_HIGH = 0.05    # FAI contribution (was 0.1)
-ALPHA_MID = 0.05     # PPR contribution (was 0.1)
-ALPHA_LOW = 0.02     # RCI contribution (was 0.05)
-ALPHA_PROG = 0.1     # Ball progression dense reward (was 0.2)
+# Reward coefficients (rescaled 2026-10-13)
+# Previous values made shaping ~99% of episode reward (game signal ≈ 1.5%).
+# New balance: game ≈ 71%, shaping ≈ 29%.  r_mid and r_low are non-trivial
+# (29% and 22% of shaping respectively).  See analysis in commit message.
+ALPHA_HIGH = 0.001   # FAI contribution (was 0.05)
+ALPHA_MID = 0.002    # PPR contribution (was 0.05)
+ALPHA_LOW = 0.001    # RCI contribution (was 0.02)
+# Ball progression dense reward (v2, 2026-10-13): potential-based, see
+# BallProgressionTracker docstring for why v1 produced no gradient.
+ALPHA_PROG = 0.05    # (was 0.5)
+
+# Scale raw GRF game reward (±1 per goal) so it dominates shaping.
+# 3 goals against → -15/ep vs shaping ≈ +6/ep.
+GAME_SCALE = 5.0
 
 # Game reward modifiers (scale from +1/-1 to meaningful values)
 GAME_WIN = +10.0
@@ -45,9 +53,16 @@ CONCEDE_PENALTY = -2.0
 # Maximum possible deviation (diagonal of the pitch)
 D_MAX = 2.24  # sqrt(2^2 + 1.2^2) ≈ 2.33, use 2.24 as practical max
 
-# Ball progression: x-delta thresholds
-PROG_STEP_REWARD = 0.5      # Reward per significant forward ball movement
-PROG_STEP_THRESHOLD = 0.02  # Min x-delta to count as progression
+# Ball progression (potential-based v2): per-step clip
+PROG_CLIP = 0.1
+
+# GK positional penalty: penalise goalkeeper leaving the penalty area.
+# GRF penalty area ≈ x ∈ [-1.0, -0.7], y ∈ [-0.26, 0.26].
+# Penalty is linear in overshoot per axis (summed) so the agent learns
+# a soft rectangular boundary.
+GK_BOX_X = -0.7
+GK_BOX_Y = 0.26
+ALPHA_GK = 0.02   # per-step penalty weight (was 0.3)
 
 
 def compute_formation_targets(
@@ -123,46 +138,41 @@ def compute_fai(
 # Ball Progression Reward (dense signal for moving ball forward)
 # ---------------------------------------------------------------------------
 class BallProgressionTracker:
-    """Track ball x-position across timesteps for progression reward.
+    """Track ball possession-progress for dense shaping (v2, potential-based).
 
-    Provides dense reward signal: reward when ball moves forward (positive Δx).
-    This is critical because game reward is extremely sparse (only on goals).
+    Potential φ(s) = ball_x · [we own the ball]; reward r_t = clip(φ(s_{t+1}) − φ(s_t)).
+
+    Why v1 failed (2026-10-13 diagnosis): v1 rewarded Δx only past a 0.02
+    threshold; typical per-step Δx ≈ 0.005, so r_prog fired ~never
+    (episode_r_progression ≈ 0.004/episode) and gave PPO zero dense gradient.
+    v1 also ignored possession: shoving the ball forward with no control paid
+    the same as a real attack. v2 is dense every step and gates on
+    possession, so turnovers in advanced areas are penalised via the φ drop.
+    As a potential-difference term it does not bias optimal policy
+    (Ng et al. 1999).
     """
     def __init__(self):
         self.reset()
 
     def reset(self):
-        self._prev_ball_x = None
+        self._prev_phi = None
         self.total_progression = 0.0
 
     def update(self, game_state: Dict) -> float:
-        """Compute ball progression reward for current step.
+        """Compute potential-based progression reward for current step."""
+        ball_x = get_ball_position(game_state)[0]
+        owned = 1.0 if game_state.get('ball_owned_team', -1) == 0 else 0.0
+        phi = ball_x * owned
 
-        Returns positive reward when ball moves toward opponent goal (x increases).
-        Returns small negative reward when ball moves backward (x decreases).
-        """
-        ball_pos = get_ball_position(game_state)
-        ball_x = ball_pos[0]
-
-        if self._prev_ball_x is None:
-            self._prev_ball_x = ball_x
+        if self._prev_phi is None:
+            self._prev_phi = phi
             return 0.0
 
-        delta_x = ball_x - self._prev_ball_x
-        self._prev_ball_x = ball_x
-
-        # Progressive reward: scale by magnitude, cap extremes
-        if delta_x > PROG_STEP_THRESHOLD:
-            # Ball moving forward: positive reward
-            reward = min(PROG_STEP_REWARD * (delta_x / PROG_STEP_THRESHOLD), 1.0)
-            self.total_progression += reward
-            return reward
-        elif delta_x < -PROG_STEP_THRESHOLD:
-            # Ball moving backward: small penalty
-            reward = max(-0.2 * (abs(delta_x) / PROG_STEP_THRESHOLD), -0.5)
-            self.total_progression += reward
-            return reward
-        return 0.0
+        delta = phi - self._prev_phi
+        self._prev_phi = phi
+        reward = float(np.clip(delta, -PROG_CLIP, PROG_CLIP))
+        self.total_progression += reward
+        return reward
 
 
 # ---------------------------------------------------------------------------
@@ -320,13 +330,15 @@ def compute_hierarchical_reward(
     enable_fai: bool = True,
     enable_ppr: bool = True,
     enable_rci: bool = True,
+    enable_gk_penalty: bool = True,
 ) -> Tuple[float, Dict[str, float]]:
     """Compute combined hierarchical reward.
 
-    R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t) + α_P·progression(t)
+    R_t = r_game + α_H·ρ_fa(t) + α_M·PPR(t) + (α_L/N)·Σ RCI_i(t)
+          + α_P·progression(t) + gk_penalty(t)
 
-    Ablation flags: enable_fai, enable_ppr, enable_rci (default True).
-    Set to False to ablate individual reward components.
+    Ablation flags: enable_fai, enable_ppr, enable_rci, enable_gk_penalty
+    (default True).  Set to False to ablate individual reward components.
 
     Returns:
         total_reward, breakdown_dict
@@ -350,16 +362,26 @@ def compute_hierarchical_reward(
     if ball_progression_tracker is not None:
         r_progression = ball_progression_tracker.update(game_state)
 
+    # GK positional penalty: linear penalty when GK (player 0) leaves the box
+    r_gk = 0.0
+    if enable_gk_penalty:
+        gk_pos = get_player_position(game_state, 'left', 0)
+        overshoot_x = max(0.0, gk_pos[0] - GK_BOX_X)          # too far forward
+        overshoot_y = max(0.0, abs(gk_pos[1]) - GK_BOX_Y)      # too far sideways
+        overshoot = overshoot_x + overshoot_y
+        if overshoot > 0:
+            r_gk = -ALPHA_GK * overshoot
+
     # Combined reward
     r_high = ALPHA_HIGH * rho_fa
     r_mid = ALPHA_MID * ppr
     r_low = ALPHA_LOW * avg_rci
     r_prog = ALPHA_PROG * r_progression
 
-    total = game_reward + r_high + r_mid + r_low + r_prog
+    total = GAME_SCALE * game_reward + r_high + r_mid + r_low + r_prog + r_gk
 
     breakdown = {
-        'game_reward': game_reward,
+        'game_reward': GAME_SCALE * game_reward,
         'fai': rho_fa,
         'ppr': ppr,
         'rci_avg': avg_rci,
@@ -367,6 +389,7 @@ def compute_hierarchical_reward(
         'r_mid': r_mid,
         'r_low': r_low,
         'r_progression': r_prog,
+        'r_gk_penalty': r_gk,
         'total': total,
     }
 

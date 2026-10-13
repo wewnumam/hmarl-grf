@@ -68,7 +68,11 @@ def _move_toward(from_pos: List[float], to_pos: List[float]) -> int:
         elif dx < 0 and dy > 0:
             return ACT_BOTTOM_LEFT
         else:
-            return ACT_BOTTOM_LEFT
+            # dx < 0 and dy < 0 -> kiri-atas. Bug fix 2026-10-13: cabang ini
+            # sebelumnya mengembalikan ACT_BOTTOM_LEFT (sama dgn cabang
+            # dx<0,dy>0) — sisa kelas bug y-inversion: setiap target di
+            # kiri-atas justru mendorong pemain ke bawah-kiri.
+            return ACT_TOP_LEFT
 
 
 def _get_best_pass_target(game_state: Dict, player_idx: int, max_open_dist: float = 0.05) -> Optional[int]:
