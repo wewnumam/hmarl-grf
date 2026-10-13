@@ -24,7 +24,7 @@ try:
 except ImportError:
     tqdm = None
 import traceback
-from typing import Dict, List
+from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
