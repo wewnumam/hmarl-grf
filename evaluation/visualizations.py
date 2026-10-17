@@ -1231,6 +1231,34 @@ def generate_all_plots(
 # ---------------------------------------------------------------------------
 # 13. Pass Network Graph
 # ---------------------------------------------------------------------------
+def _draw_pitch(ax, facecolor='#fafafa'):
+    """Standard football pitch markings in 120×80 pitch units."""
+    mark = dict(color='#8a8a8a', linewidth=0.8, fill=False, zorder=1)
+    ax.add_patch(Rectangle((0, 0), 120, 80, facecolor=facecolor,
+                           edgecolor='#4a4a4a', linewidth=1.2, zorder=0))
+    ax.plot([60, 60], [0, 80], color=mark['color'], lw=mark['linewidth'], zorder=1)
+    ax.add_patch(plt.Circle((60, 40), 10.5, **mark))
+    ax.plot(60, 40, marker='o', ms=2.5, color=mark['color'], zorder=1)
+    # penalty area 16.5 m × 40.3 m, goal area 5.5 m × 18.32 m (scaled 120×80)
+    for side in ('l', 'r'):
+        x_box = 0.0 if side == 'l' else 120 - 18.9
+        ax.add_patch(Rectangle((x_box, 16.3), 18.9, 47.4, **mark))
+        x_goal = 0.0 if side == 'l' else 120 - 6.3
+        ax.add_patch(Rectangle((x_goal, 29.2), 6.3, 21.6, **mark))
+        spot_x = 12.6 if side == 'l' else 107.4
+        ax.plot(spot_x, 40, marker='o', ms=2.0, color=mark['color'], zorder=1)
+        th1, th2 = (-53, 53) if side == 'l' else (127, 233)
+        ax.add_patch(matplotlib.patches.Arc((spot_x, 40), 21.0, 21.0,
+                                            theta1=th1, theta2=th2, **mark))
+    ax.set_xlim(-4, 124)
+    ax.set_ylim(-4, 84)
+    ax.set_aspect('equal')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
 def plot_pass_network(
     pass_matrix: np.ndarray,
     output_path: str,
@@ -1238,77 +1266,119 @@ def plot_pass_network(
     observation: Optional[Any] = None,
     team_side: str = 'left',
     title: str = 'Pass Network',
+    positions: Optional[np.ndarray] = None,
+    stats: Optional[Dict[str, float]] = None,
 ):
-    """Weighted directed graph of pass connections between players.
+    """Weighted directed pass graph drawn on a football pitch background.
 
-    When observation is provided, nodes are placed at actual player positions.
-    Otherwise falls back to a fixed formation layout.
+    Args:
+        positions: optional (n, 2) mean player positions in GRF coords
+            (-1..1, -0.42..0.42). Falls back to observation, then a fixed
+            formation layout — all 11 nodes are always drawn.
+        stats: metric panel values (hmarl.metrics.pass_network_stats +
+            pass_network_cohesion).
     """
     _apply_style()
-    fig, ax = plt.subplots(figsize=(8, 6))
-
     n = pass_matrix.shape[0]
 
-    if observation is not None:
-        state = observation[0]
-        role_order = get_role_order(observation)
-        team_key = f'{team_side}_team'
-        raw = np.asarray(state[team_key], dtype=float)
-        # Use GRF coords directly (-1..1 x, -0.42..0.42 y)
-        positions = {i: (raw[i][0], raw[i][1]) for i in range(n)}
-        role_names = list(role_order)
+    if positions is not None:
+        raw = np.asarray(positions, dtype=float)[:n]
+    elif observation is not None:
+        raw = np.asarray(observation[0][f'{team_side}_team'], dtype=float)[:n]
     else:
-        positions = {
-            0: (0.10, 0.50), 1: (0.30, 0.70), 2: (0.30, 0.25),
-            3: (0.30, 0.75), 4: (0.50, 0.35), 5: (0.50, 0.65),
-            6: (0.70, 0.15), 7: (0.70, 0.40), 8: (0.70, 0.60),
-            9: (0.70, 0.85), 10: (0.85, 0.50),
-        }
-        role_names = roles if roles else list(range(n))
+        # fixed 4-3-3 fallback layout (GRF coords)
+        raw = np.array([
+            [-0.90, 0.00], [-0.55, -0.20], [-0.55, 0.20],
+            [-0.45, -0.36], [-0.45, 0.36], [-0.18, 0.00],
+            [-0.05, -0.22], [-0.05, 0.22], [0.25, -0.34],
+            [0.38, 0.00], [0.25, 0.34],
+        ])[:n]
+    # scale GRF coords -> pitch units (120 x 80), same as role heatmap
+    px = (raw[:, 0] + 1.0) * 60.0
+    py = (raw[:, 1] + 0.42) * (80.0 / 0.84)
+    node_pos = {i: (float(px[i]), float(py[i])) for i in range(n)}
 
-    labels = [ROLE_NAMES.get(
-        role_names[i] if isinstance(role_names[i], str) else role_names[i],
-        str(i)
-    ) for i in range(n)]
-    # If role_names came from get_role_order, they're already strings
     if observation is not None:
-        labels = [str(r) for r in role_names]
+        labels = [str(r) for r in get_role_order(observation)]
+    else:
+        role_names = roles if roles else list(range(n))
+        labels = [ROLE_NAMES.get(role_names[i] if i < len(role_names) else i, str(i))
+                  for i in range(n)]
 
-    # Draw edges
-    max_pass = max(pass_matrix.max(), 1)
+    fig, (ax, axm) = plt.subplots(
+        1, 2, figsize=(13, 6.6), gridspec_kw={'width_ratios': [2.6, 1.0]})
+    _draw_pitch(ax)
+
+    # Edges
+    max_pass = max(float(pass_matrix.max()), 1.0)
     for i in range(n):
         for j in range(n):
             if i == j or pass_matrix[i, j] == 0:
                 continue
-            width = 0.5 + 3.0 * (pass_matrix[i, j] / max_pass)
-            xi, yi = positions[i]
-            xj, yj = positions[j]
+            width = 0.5 + 3.0 * (float(pass_matrix[i, j]) / max_pass)
             ax.annotate(
-                '', xy=(xj, yj), xytext=(xi, yi),
+                '', xy=node_pos[j], xytext=node_pos[i],
                 arrowprops=dict(
                     arrowstyle='->', lw=width,
-                    color='#666666', alpha=0.5,
+                    color='#555555', alpha=0.6,
                     connectionstyle='arc3,rad=0.1',
                 ),
             )
 
-    # Draw nodes
+    # Nodes (always all n)
+    row_max = max(float(pass_matrix.sum(axis=1).max()), 1.0)
     for i in range(n):
-        x, y = positions[i]
-        total_pass = pass_matrix[i].sum()
-        size = 300 + 700 * (total_pass / max(max_pass, 1))
-        role_label = labels[i]
-        color = ROLE_COLORS.get(role_label, '#888888')
+        x, y = node_pos[i]
+        size = 300 + 700 * (float(pass_matrix[i].sum()) / row_max)
+        color = ROLE_COLORS.get(labels[i], '#888888')
         ax.scatter(x, y, s=size, c=color, edgecolors='#333333',
                    linewidths=0.8, zorder=3)
         ax.annotate(labels[i], (x, y), textcoords='offset points',
-                    xytext=(0, -14), ha='center', fontsize=8, fontweight='bold')
+                    xytext=(0, -15), ha='center', fontsize=8,
+                    fontweight='bold', zorder=4,
+                    bbox=dict(facecolor='white', alpha=0.75,
+                              edgecolor='none', pad=1.2))
 
-    ax.set_xlim(-1.1, 1.1)
-    ax.set_ylim(-0.5, 0.5)
-    ax.set_aspect('equal')
     ax.set_title(title)
-    ax.axis('off')
+
+    # Metrics panel
+    axm.axis('off')
+    panel = dict(stats or {})
+    if panel:
+        rows = [
+            ('Pass & Possession', None, None),
+            ('Total pass', 'total_pass', '.0f'),
+            ('Completed', 'completed_pass', '.0f'),
+            ('Completed (%)', 'pass_completion_pct', '.1f'),
+            ('Median pass length', 'median_pass_length', '.1f'),
+            ('Possession (steps)', 'possession_steps', '.0f'),
+            ('Possession (%)', 'possession_pct', '.1f'),
+            ('Passes / 100 steps', 'passes_per_100_step', '.2f'),
+            ('Passes / possession', 'passes_per_possession', '.2f'),
+            (None, None, None),
+            ('Network', None, None),
+            ('Cohesion (lambda2)', 'cohesion', '.3f'),
+            ('Triangulation', 'triangulation', '.3f'),
+            ('Resistance', 'resistance', '.2f'),
+        ]
+        lines = []
+        for label, key, fmt in rows:
+            if label is None:
+                lines.append('')
+            elif key is None:
+                lines.append(label)
+            elif key in panel:
+                lines.append(f'  {label:<24}{panel[key]:{fmt}}')
+        lines.append('')
+        lines.append('Possession %: team / (team + opp)')
+        lines.append('Length: pitch units (120x80)')
+    else:
+        lines = ['Pass Network',
+                 f'  Completed passes       {int(pass_matrix.sum())}']
+    axm.text(0.0, 1.0, '\n'.join(lines), transform=axm.transAxes,
+             va='top', ha='left', family='monospace', fontsize=9,
+             linespacing=1.5)
+
     fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
@@ -1428,7 +1498,14 @@ def plot_action_transitions(
     """
     _apply_style()
     n = min(trans_probs.shape[0], max_actions)
-    fig, ax = plt.subplots(figsize=(8, 7))
+    # GRF action set (19): movement actions labeled with direction arrows
+    labels = [
+        'Idle', '←', '↖', '↑', '↗', '→', '↘', '↓', '↙',
+        'Long\npass', 'High\npass', 'Short\npass', 'Shot',
+        'Sprint', 'Release\ndir', 'Release\nsprint', 'Slide',
+        'Dribble', 'Release\ndribble',
+    ][:n]
+    fig, ax = plt.subplots(figsize=(11, 7.5))
 
     im = ax.imshow(trans_probs[:n, :n], cmap='viridis', aspect='equal')
     ax.set_xlabel('Next Action')
@@ -1436,6 +1513,8 @@ def plot_action_transitions(
     ax.set_title(title)
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
+    ax.set_xticklabels(labels, rotation=45, ha='left', fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label('P(next | current)')

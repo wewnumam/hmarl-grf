@@ -126,12 +126,15 @@ class MidLevelPolicy:
                 return SUBGOAL_ZONAL_MARKING
             return SUBGOAL_BUILD_UP
 
-        # Midfield roles: DM, CM, AM
+        # Midfield roles: DM, CM, AM  (obs101 fix 2026-10-16: pressing used to
+        # map to CLEARANCE — midfielders retreated for ~91% of the game
+        # (no possession) and possession stayed at 9%.  Now: contest the ball
+        # when pressing, circulate it when we have it, clear only near our box.)
         if role in (ROLE_DM, ROLE_CM, ROLE_AM):
             if ball_in_defense:
                 return SUBGOAL_CLEARANCE
-            if macro_strategy in (STRATEGY_HIGH_PRESSING, STRATEGY_COUNTER_ATTACK):
-                return SUBGOAL_CLEARANCE
+            if macro_strategy == STRATEGY_HIGH_PRESSING:
+                return SUBGOAL_MAN_MARKING
             return SUBGOAL_BUILD_UP
 
         # Attack roles: LM (wing), RM (wing), CF (center forward)
@@ -231,13 +234,20 @@ class HierarchicalActorCritic(nn.Module):
     def get_action_and_value(
         self, obs: torch.Tensor, subgoal_embed: torch.Tensor,
         action: Optional[torch.Tensor] = None,
+        action_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample or evaluate action.
+
+        action_mask: bool tensor (..., action_dim) — True = legal. Illegal
+        logits are zeroed out (-1e9) so rollout sampling and PPO update see
+        the same distribution.
 
         Returns:
             action, log_prob, entropy, value
         """
         logits, value = self.forward(obs, subgoal_embed)
+        if action_mask is not None:
+            logits = logits.masked_fill(~action_mask, -1e9)
         dist = torch.distributions.Categorical(logits=logits)
 
         if action is None:

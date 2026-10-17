@@ -5,8 +5,17 @@ services:
     stdin_open: true
     tty: true
     working_dir: /gfootball
+    # PID1 = auto-resuming training loop (scripts/train_loop.sh): crash/VM-reboot
+    # resumes from latest checkpoint. Clean stop: `docker stop gfootball-dev`.
+    # Completed run exits 0 -> on-failure keeps it down. Override via env below.
+    command: bash /gfootball/scripts/train_loop.sh
+    restart: on-failure
     environment:
       DISPLAY: host.docker.internal:0.0
+      TSTEPS: ${TSTEPS:-900000}
+      LOG_DIR: ${LOG_DIR:-dumps_obs103}
+      MODEL_DIR: ${MODEL_DIR:-checkpoints_obs103}
+      INIT_CKPT: ${INIT_CKPT:-checkpoints_obs102/hmarl_model.pt}
     volumes:
       - .:/gfootball
       - /tmp/.X11-unix:/tmp/.X11-unix:rw

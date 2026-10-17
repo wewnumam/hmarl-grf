@@ -103,6 +103,29 @@ ACTION_CATEGORIES = {
 }
 
 
+# Illegal actions per ball-ownership mode (Saltyfish, Kaggle Football 2020
+# 2nd place): masks away impossible moves to shrink the exploration space.
+_ILLEGAL_BY_OWNER = {
+    0: (16,),                          # we have the ball: no sliding
+    1: (9, 10, 11, 12, 17, 18),        # opponent has it: no pass/shot/dribble
+    -1: (9, 10, 11, 12, 16, 17, 18),   # loose ball: those + sliding
+}
+
+
+def get_action_mask(game_state: Dict) -> np.ndarray:
+    """Bool mask (19,) — True = legal action for the current ball ownership.
+
+    Unknown/missing ownership -> all actions legal (fail-open).
+    """
+    mask = np.ones(ACTION_SPACE_SIZE, dtype=bool)
+    if 'ball_owned_team' not in game_state:
+        return mask  # fail-open: unknown state -> all legal
+    owner = game_state['ball_owned_team']
+    for a in _ILLEGAL_BY_OWNER.get(owner, ()):
+        mask[a] = False
+    return mask
+
+
 def get_action_category(action: int) -> str:
     """Map GRF action index to tactical category."""
     for cat, actions in ACTION_CATEGORIES.items():
@@ -156,8 +179,14 @@ def create_raw_env(
     log_dir: str = LOG_DIR,
     render: bool = False,
     write_dumps: bool = False,
+    rewards: str = "scoring",
 ) -> Any:
-    """Create GRF environment with raw representation."""
+    """Create GRF environment with raw representation.
+
+    rewards: comma-separated GRF reward list; 'checkpoints' adds the built-in
+    dense checkpoint reward on top of 'scoring' (Saltyfish Kaggle 2020 recipe:
+    use checkpoints early, drop them once offense is learned).
+    """
     env = football_env.create_environment(
         env_name=env_name,
         representation="raw",
@@ -166,6 +195,7 @@ def create_raw_env(
         logdir=log_dir,
         write_full_episode_dumps=write_dumps,
         render=render,
+        rewards=rewards,
     )
     _open_envs.add(env)
     return env

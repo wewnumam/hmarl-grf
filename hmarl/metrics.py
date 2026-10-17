@@ -354,6 +354,141 @@ def pass_network_matrix(
     return counts
 
 
+def pass_network_stats(
+    game_states: List[Dict],
+    actual_actions: List[List[int]],
+    team_id: int = 0,
+) -> Dict[str, float]:
+    """Pass and possession statistics for the pass-network figure.
+
+    Definitions:
+        total_pass            – pass attempts (pass action issued by ball owner)
+        completed_pass        – attempts where next frame team still owns ball
+                                and receiver differs from passer
+        pass_completion_pct   – completed / total_pass × 100
+        median_pass_length    – median passer→receiver distance at pass time
+                                (pitch units, 120×80 scale)
+        possession_steps      – steps with team-owned ball
+        possession_pct        – team / (team + opponent) × 100 (neutral excluded)
+        passes_per_100_step   – attempts / total steps × 100
+        passes_per_possession – attempts / team possession sequences
+    """
+    side_key = 'left_team' if team_id == 0 else 'right_team'
+    attempts = completed = 0
+    lengths: List[float] = []
+    team_steps = opp_steps = possessions = 0
+    prev_owned = None
+
+    for t, gs in enumerate(game_states):
+        owned = gs.get('ball_owned_team', -1)
+        if owned == team_id:
+            team_steps += 1
+            if prev_owned != team_id:
+                possessions += 1
+        elif owned == 1 - team_id:
+            opp_steps += 1
+        prev_owned = owned
+
+        if owned != team_id or t >= len(actual_actions) or t + 1 >= len(game_states):
+            continue
+        passer = gs.get('ball_owned_player', -1)
+        if passer is None or passer < 0 or passer >= 11:
+            continue
+        if actual_actions[t][passer] not in PASS_ACTION_IDS:
+            continue
+        attempts += 1
+        gs_next = game_states[t + 1]
+        if gs_next.get('ball_owned_team', -1) != team_id:
+            continue
+        receiver = gs_next.get('ball_owned_player', -1)
+        if receiver is None or receiver < 0 or receiver >= 11 or receiver == passer:
+            continue
+        completed += 1
+        pos = gs.get(side_key, [])
+        if len(pos) > max(passer, receiver):
+            dx = (float(pos[passer][0]) - float(pos[receiver][0])) * 60.0
+            dy = (float(pos[passer][1]) - float(pos[receiver][1])) * (80.0 / 0.84)
+            lengths.append(math.hypot(dx, dy))
+
+    total_steps = len(game_states)
+    denom = team_steps + opp_steps
+    return {
+        'total_pass': float(attempts),
+        'completed_pass': float(completed),
+        'pass_completion_pct': 100.0 * completed / attempts if attempts else 0.0,
+        'median_pass_length': float(np.median(lengths)) if lengths else 0.0,
+        'possession_steps': float(team_steps),
+        'possession_pct': 100.0 * team_steps / denom if denom else 0.0,
+        'passes_per_100_step': 100.0 * attempts / total_steps if total_steps else 0.0,
+        'passes_per_possession': float(attempts) / possessions if possessions else 0.0,
+    }
+
+
+def pass_network_cohesion(pass_matrix: np.ndarray) -> Dict[str, float]:
+    """Network metrics of the undirected pass graph.
+
+    Definitions:
+        cohesion      – algebraic connectivity λ₂ of the binary Laplacian
+                        (0 = disconnected; higher = more cohesive)
+        triangulation – transitivity 3·triangles / connected triplets (0–1):
+                        share of closed passing triangles
+        resistance    – mean effective resistance (Kirchhoff; weighted Laplacian
+                        pseudoinverse) over node pairs within the same connected
+                        component; lower = more redundant passing paths
+                        (cross-component pairs have infinite resistance, see
+                        cohesion = 0)
+    """
+    w = np.asarray(pass_matrix, dtype=float)
+    n = w.shape[0]
+    adj = ((w + w.T) > 0).astype(float)
+    np.fill_diagonal(adj, 0.0)
+    deg = adj.sum(axis=1)
+    lap = np.diag(deg) - adj
+    eigenvalues = np.linalg.eigvalsh(lap)
+    cohesion = float(eigenvalues[1]) if n > 1 else 0.0
+
+    triplets = float(np.sum(deg * (deg - 1) / 2))
+    triangles = float(np.trace(adj @ adj @ adj) / 6.0)
+    triangulation = 3.0 * triangles / triplets if triplets > 0 else 0.0
+
+    weighted = w + w.T
+    if weighted.sum() <= 0:
+        weighted = adj
+    wl = np.diag(weighted.sum(axis=1)) - weighted
+
+    seen = set()
+    comp_means: List[float] = []
+    comp_counts: List[int] = []
+    for s in range(n):
+        if s in seen:
+            continue
+        comp, stack = [s], [s]
+        seen.add(s)
+        while stack:
+            u = stack.pop()
+            for v in np.flatnonzero(adj[u]):
+                v = int(v)
+                if v not in seen:
+                    seen.add(v)
+                    comp.append(v)
+                    stack.append(v)
+        if len(comp) < 2:
+            continue
+        sub = wl[np.ix_(comp, comp)]
+        p = np.linalg.pinv(sub)
+        d = np.diag(p)
+        r = d[:, None] + d[None, :] - 2 * p
+        iu = np.triu_indices(len(comp), k=1)
+        comp_means.append(float(np.mean(r[iu])))
+        comp_counts.append(len(iu[0]))
+    if comp_counts:
+        resistance = float(np.average(comp_means, weights=comp_counts))
+    else:
+        resistance = float('inf')
+    return {'cohesion': cohesion, 'triangulation': triangulation,
+            'resistance': resistance}
+
+
 def inter_agent_distance_per_line(
     game_states: List[Dict],
     team_side: str = 'left',

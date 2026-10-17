@@ -11,6 +11,7 @@ Algorithm (from thesis BAB_4, Algoritme 1):
 5. PPO update on Low-Level policy parameters
 """
 
+import math
 import os
 import signal
 import sys
@@ -26,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
+# tiny forward passes (eval, 11-agent policies) thrash with default thread pool on the 3.7GB WSL2 VM
+torch.set_num_threads(1)
 import torch.nn as nn
 import torch.optim as optim
 from hmarl.utils import set_seed as _set_seed_util, extract_obs_vector as _extract_obs_util, save_checkpoint as _save_ckpt, load_ckpt as _load_ckpt
@@ -41,7 +44,7 @@ except (ImportError, AttributeError):
 
 from hmarl.env import (
     create_raw_env, NUM_AGENTS, ACTION_SPACE_SIZE,
-    extract_game_state, get_action_category,
+    extract_game_state, get_action_category, get_action_mask,
 )
 from hmarl.policy import (
     HierarchicalActorCritic, HierarchicalController,
@@ -50,7 +53,7 @@ from hmarl.policy import (
     STRATEGY_POSSESSION,
 )
 from hmarl.expert import ExpertPolicyAllAgents
-from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward, CONCEDE_PENALTY
+from hmarl.reward import PassTracker, RCITracker, BallProgressionTracker, compute_hierarchical_reward, CONCEDE_PENALTY, GOAL_REWARD
 from hmarl.metrics import (
     compute_win_rate, compute_goal_difference,
     pass_success_ratio, progressive_pass_ratio,
@@ -67,7 +70,9 @@ from hmarl.run_logging import (
 # ---------------------------------------------------------------------------
 LEARNING_RATE = 3e-4
 GAMMA = 1.0           # Song et al. (2024): gamma=1 most stable for 11v11
-GAE_LAMBDA = 0.95     # GAE lambda
+GAE_LAMBDA = 0.99      # GAE lambda (0.95 → 0.99, 2026-10-15: 0.95^100 ≈ 0.006,
+                       # so credit from concede/terminal events (every ~330 steps)
+                       # died before reaching the decisions that caused them)
 CLIP_RANGE = 0.2      # PPO clip range
 ENT_COEF = 0.01       # Entropy coefficient (c2)
 VF_COEF = 0.5         # Value loss coefficient (c1)
@@ -76,7 +81,7 @@ NUM_EPOCHS = 4        # PPO epochs per update
 TOTAL_TIMESTEPS = 3_000_000  # 2-5 juta (thesis)
 EPISODE_MAX_STEPS = 3000   # GRF half = 3000 timesteps
 LOG_FREQ = 50              # TensorBoard scalars + print every N episodes
-SAVE_FREQ = 500            # Checkpoint + eval every N episodes
+SAVE_FREQ = 50             # Checkpoint + eval every N episodes (1000-ep run: 20 saves, hard crash loses ≤50 ep ≈ 2.6h)
 NUM_EVAL_EPISODES = 10     # Episodes per mid-training eval
 DUMP_FREQ = 500          # Enable dump every N episodes
 MAX_DUMPS = 10            # Keep at most N dump files
@@ -97,6 +102,25 @@ ENABLE_FAI = _os.environ.get("ENABLE_FAI", "1") != "0"   # Formation Adherence I
 ENABLE_PPR = _os.environ.get("ENABLE_PPR", "1") != "0"   # Progressive Pass Ratio
 ENABLE_RCI = _os.environ.get("ENABLE_RCI", "1") != "0"   # Role Coherence Index
 print(f"Ablation: FAI={ENABLE_FAI} | PPR={ENABLE_PPR} | RCI={ENABLE_RCI}")
+# Saltyfish-style legal-action mask (ball_owned_team dependent), default ON.
+# Entropy ceiling drops from ln(19)≈2.944 to ln(18)≈2.890 when masked.
+USE_ACTION_MASK = _os.environ.get("ACTION_MASK", "1") != "0"
+print(f"Action mask: {USE_ACTION_MASK}")
+
+
+def _possession_stats(game_states):
+    """(mean ball_x all steps, mean ball_x saat kita pegang, fraksi poss kita).
+
+    Koordinat GRF ternormalisasi x∈[-1,1]; kita selalu kiri (left_agents=11,
+    terverifikasi via ScenarioConfig) jadi +x = menyerang. ball_owned_team 0 = kita.
+    Empty list -> (0.0, 0.0, 0.0) supaya series tetap sejajar.
+    """
+    xs = [float(gs.get('ball', (0.0, 0.0, 0.0))[0]) for gs in game_states]
+    ours = [x for gs, x in zip(game_states, xs) if gs.get('ball_owned_team') == 0]
+    n = len(xs)
+    return (sum(xs) / n if n else 0.0,
+            sum(ours) / len(ours) if ours else 0.0,
+            len(ours) / n if n else 0.0)
 
 
 def set_seed(seed: int):
@@ -124,6 +148,7 @@ class RolloutBuffer:
         self.dones = []
         self.advantages = []
         self.returns = []
+        self.action_masks = []  # bool (19,) per transition; all-legal default
 
         # Buffer tracks per-agent transitions (one per agent per timestep)
         # Rewards are filled retroactively after computing the combined reward
@@ -136,6 +161,7 @@ class RolloutBuffer:
         action: int,
         log_prob: float,
         value: float,
+        action_mask: np.ndarray = None,
     ):
         """Add a single agent's transition (reward filled later)."""
         self.observations.append(obs)
@@ -145,6 +171,9 @@ class RolloutBuffer:
         self.rewards.append(0.0)  # placeholder
         self.values.append(value)
         self.dones.append(False)
+        if action_mask is None:
+            action_mask = np.ones(ACTION_SPACE_SIZE, dtype=bool)
+        self.action_masks.append(action_mask)
 
     def start_timestep(self):
         """Mark start of a new timestep's agent transitions."""
@@ -205,6 +234,7 @@ class RolloutBuffer:
                 'log_probs_old': torch.FloatTensor([self.log_probs[i] for i in batch_indices]).to(DEVICE),
                 'advantages': torch.FloatTensor([self.advantages[i] for i in batch_indices]).to(DEVICE),
                 'returns': torch.FloatTensor([self.returns[i] for i in batch_indices]).to(DEVICE),
+                'action_mask': torch.BoolTensor(np.array([self.action_masks[i] for i in batch_indices])).to(DEVICE),
             }
 
 
@@ -221,16 +251,25 @@ class HMARLTrainer:
         model_dir: str = MODEL_DIR,
         render: bool = False,
         scenario: str = "11_vs_11_stochastic",
+        checkpoint_reward: bool = False,
     ):
         self.total_timesteps = total_timesteps
         self.log_dir = log_dir
         self.model_dir = model_dir
         self.render = render
         self.scenario = scenario
+        # GRF built-in checkpoint reward on top of scoring (dense backcourt ->
+        # frontcourt signal; Saltyfish recipe for the early PVE phase).
+        self.checkpoint_reward = checkpoint_reward
+        self.rewards = "scoring,checkpoints" if checkpoint_reward else "scoring"
 
         # Map scenario → env_name + num_agents
         SCENARIO_MAP = {
             "11_vs_11_stochastic": {"env": "11_vs_11_stochastic", "agents": 11},
+            # Curriculum stages: bot difficulty baked into the scenario
+            # (0.05 / 0.6 / 0.95), Saltyfish-style easy-bot-first training.
+            "11_vs_11_easy_stochastic": {"env": "11_vs_11_easy_stochastic", "agents": 11},
+            "11_vs_11_hard_stochastic": {"env": "11_vs_11_hard_stochastic", "agents": 11},
             "academy_single_goal_versus_lazy": {"env": "academy_single_goal_versus_lazy", "agents": 11},
             "academy_empty_goal": {"env": "academy_empty_goal", "agents": 1},
             "academy_3_vs_1_with_keeper": {"env": "academy_3_vs_1_with_keeper", "agents": 3},
@@ -243,7 +282,7 @@ class HMARLTrainer:
 
         # Create environment (use raw for full game state access)
         self.env = create_raw_env(env_name=self.env_name, num_agents=self.num_agents,
-                                  render=render, write_dumps=False)
+                                  render=render, write_dumps=False, rewards=self.rewards)
 
         # Hierarchical controller (rule-based high/mid)
         self.controller = HierarchicalController()
@@ -327,7 +366,9 @@ class HMARLTrainer:
         all_ideal_actions = []
         all_game_states = []
         breakdown_sums = {}  # Accumulate reward breakdown for episode average
+        abs_sums = {}        # |value| sums for density checks (2026-10-15)
         prev_goals_against = 0  # Track for concede penalty
+        prev_goals_for = 0      # Track for goal bonus (mirror of concede)
 
         prev_game_state = None
         done = False
@@ -349,6 +390,16 @@ class HMARLTrainer:
             step_log_probs = []
             step_values = []
 
+            # Legal-action mask (same for every agent: ball_owned_team is a
+            # global field). None -> unmasked, buffer stores all-legal mask so
+            # rollout sampling and PPO update stay consistent.
+            if USE_ACTION_MASK:
+                step_mask = get_action_mask(game_state)
+                mask_t = torch.from_numpy(step_mask).to(DEVICE)
+            else:
+                step_mask = None
+                mask_t = None
+
             if training:
                 self.buffer.start_timestep()
 
@@ -360,7 +411,9 @@ class HMARLTrainer:
                     with torch.no_grad():
                         obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
                         sg_t = torch.FloatTensor(sg_embed).unsqueeze(0).to(DEVICE)
-                        action, log_prob, _, value = self.policy.get_action_and_value(obs_t, sg_t)
+                        action, log_prob, _, value = self.policy.get_action_and_value(
+                            obs_t, sg_t, action_mask=mask_t,
+                        )
                         action = action.item()
                         log_prob = log_prob.item()
                         value = value.item()
@@ -369,6 +422,8 @@ class HMARLTrainer:
                         obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
                         sg_t = torch.FloatTensor(sg_embed).unsqueeze(0).to(DEVICE)
                         logits, value = self.policy(obs_t, sg_t)
+                        if mask_t is not None:
+                            logits = logits.masked_fill(~mask_t, -1e9)
                         action = logits.argmax(dim=-1).item()
                         log_prob = 0.0
                         value = value.item()
@@ -385,6 +440,7 @@ class HMARLTrainer:
                         action=action,
                         log_prob=log_prob,
                         value=value,
+                        action_mask=step_mask,
                     )
                     self.buffer.record_agent_index()
 
@@ -401,15 +457,31 @@ class HMARLTrainer:
             # Mid-episode: game_reward = 0 (shaping provides dense signal)
             # Terminal reward applied AFTER episode loop (see below)
             team_reward = 0.0  # mid-episode: no game reward, shaping only
+            if self.checkpoint_reward:
+                # rewards='scoring,checkpoints': env reward = scoring (per
+                # player, in info['score_reward']) + checkpoint bonuses.
+                # Keep ONLY the checkpoint component — scoring stays with the
+                # manual concede penalty + terminal win/lose bonus, so nothing
+                # is double-counted.
+                _gr = np.atleast_1d(np.asarray(game_reward, dtype=np.float64))
+                _score = float(info.get('score_reward', 0.0))
+                team_reward = float(_gr.sum() - _gr.size * _score)
 
             new_game_state = extract_game_state(obs_raw)
 
-            # Concede penalty: apply when goals_against increases
+            # Score-change rewards: symmetric per-goal signal, both directions.
+            # 2026-10-17: previously only conceding was priced in-episode, so
+            # the policy's only live game gradient was "do not concede".
             _score_now = new_game_state.get('score', [0, 0])
-            _ga_now = _score_now[1] if isinstance(_score_now, (list, tuple)) else 0
+            if isinstance(_score_now, (list, tuple)):
+                _gf_now, _ga_now = _score_now[0], _score_now[1]
+            else:
+                _gf_now = _ga_now = 0
+            if _gf_now > prev_goals_for:
+                team_reward += GOAL_REWARD * (_gf_now - prev_goals_for)
+                prev_goals_for = _gf_now
             if _ga_now > prev_goals_against:
-                _conceded = _ga_now - prev_goals_against
-                team_reward += CONCEDE_PENALTY * _conceded
+                team_reward += CONCEDE_PENALTY * (_ga_now - prev_goals_against)
                 prev_goals_against = _ga_now
 
             # ---- Tahap 4: Compute combined reward ----
@@ -443,6 +515,8 @@ class HMARLTrainer:
             # Accumulate reward breakdown
             for k, v in reward_breakdown.items():
                 breakdown_sums[k] = breakdown_sums.get(k, 0.0) + float(v)
+                if k in ('r_progression', 'r_mid'):
+                    abs_sums[k] = abs_sums.get(k, 0.0) + abs(float(v))
 
             all_actual_actions.append(joint_actions)
             all_ideal_actions.append(ideal_actions)
@@ -489,6 +563,11 @@ class HMARLTrainer:
         # Compute episode averages for breakdown
         ep_steps = max(episode_steps, 1)
         breakdown_avg = {k: v / ep_steps for k, v in breakdown_sums.items()}
+        # Density diagnostics: signed means of r_progression/r_mid are ≈0 by
+        # construction (zero-sum / rare events); the mean |·| shows whether
+        # the dense terms actually fire each step (2026-10-15).
+        breakdown_avg['r_progression_abs'] = abs_sums.get('r_progression', 0.0) / ep_steps
+        breakdown_avg['r_mid_abs'] = abs_sums.get('r_mid', 0.0) / ep_steps
 
         return {
             'episode_reward': episode_reward,
@@ -512,6 +591,9 @@ class HMARLTrainer:
         total_pg_loss = 0.0
         total_v_loss = 0.0
         total_entropy = 0.0
+        kl_accum = 0.0
+        clipfrac_accum = 0.0
+        adv_sum, adv_sumsq, adv_n = 0.0, 0.0, 0
         num_updates = 0
 
         for epoch in range(NUM_EPOCHS):
@@ -523,12 +605,18 @@ class HMARLTrainer:
                 advantages = batch['advantages']
                 returns = batch['returns']
 
+                # Raw (pre-normalization) advantage spread — logged 2026-10-15:
+                # tells whether GAE produced a usable gradient at all.
+                adv_sum += float(advantages.sum())
+                adv_sumsq += float((advantages ** 2).sum())
+                adv_n += int(advantages.numel())
+
                 # Normalize advantages
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-                # Forward pass
+                # Forward pass (same legal-action mask as rollout sampling)
                 _, new_log_probs, entropy, new_values = self.policy.get_action_and_value(
-                    obs, sg_embed, actions,
+                    obs, sg_embed, actions, action_mask=batch['action_mask'],
                 )
 
                 # Policy loss (clipped)
@@ -536,6 +624,10 @@ class HMARLTrainer:
                 surr1 = ratio * advantages
                 surr2 = torch.clamp(ratio, 1.0 - CLIP_RANGE, 1.0 + CLIP_RANGE) * advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
+
+                # Update diagnostics (2026-10-15)
+                kl_accum += float((new_log_probs - old_log_probs).mean())
+                clipfrac_accum += float(((ratio - 1.0).abs() > CLIP_RANGE).float().mean())
 
                 # Value loss
                 value_loss = nn.MSELoss()(new_values, returns)
@@ -567,6 +659,25 @@ class HMARLTrainer:
             self.writer.add_scalar('loss/value', total_v_loss / num_updates, self.global_step)
             self.writer.add_scalar('loss/entropy', total_entropy / num_updates, self.global_step)
 
+            # Per-update diagnostics → run JSON (2026-10-15)
+            if adv_n > 0:
+                adv_std = math.sqrt(max(adv_sumsq / adv_n - (adv_sum / adv_n) ** 2, 0.0))
+            else:
+                adv_std = 0.0
+            diagnostics = {
+                'update_policy_loss': total_pg_loss / num_updates,
+                'update_value_loss': total_v_loss / num_updates,
+                'update_entropy': total_entropy / num_updates,
+                'update_approx_kl': kl_accum / num_updates,
+                'update_clipfrac': clipfrac_accum / num_updates,
+                'update_adv_std': adv_std,
+            }
+            for key, value in diagnostics.items():
+                self._train_log[key].append(float(value))
+            self.writer.add_scalar('loss/approx_kl', diagnostics['update_approx_kl'], self.global_step)
+            self.writer.add_scalar('loss/clipfrac', diagnostics['update_clipfrac'], self.global_step)
+            self.writer.add_scalar('training/adv_std', adv_std, self.global_step)
+
     def _init_training_log(self):
         """Initialize per-episode training log for visualizations."""
         self._train_log = {
@@ -579,6 +690,10 @@ class HMARLTrainer:
             'episode_goals_for': [],
             'episode_goals_against': [],
             'episode_ball_progression': [],
+            # Possession/ball-position instrumentation (penetration evidence)
+            'episode_ball_x_mean': [],    # mean ball x, all steps (x∈[-1,1], +x = menyerang; kita selalu kiri)
+            'episode_ball_x_poss': [],    # mean ball x saat ball_owned_team==0 (0.0 bila tak pernah pegang)
+            'episode_poss_frac': [],      # fraksi step dengan penguasaan kita
             'episode_action_distribution': [],  # [counts per action] per episode
             # PPR diagnostics
             'episode_pass_attempts': [],
@@ -590,6 +705,18 @@ class HMARLTrainer:
             'episode_r_mid': [],
             'episode_r_low': [],
             'episode_r_progression': [],
+            # Density diagnostics: mean |value| per step (2026-10-15)
+            'episode_r_progression_abs': [],
+            'episode_r_mid_abs': [],
+            # PPO update diagnostics — one entry per update (= per episode;
+            # updates run once per episode).  2026-10-15: the 500-ep run had
+            # no way to see gradient health beyond action entropy.
+            'update_policy_loss': [],
+            'update_value_loss': [],
+            'update_entropy': [],
+            'update_approx_kl': [],
+            'update_clipfrac': [],
+            'update_adv_std': [],
         }
 
     def _append_training_log(self, stats: Dict):
@@ -633,6 +760,12 @@ class HMARLTrainer:
         ball_prog = stats.get('ball_progression_total', 0.0)
         self._train_log['episode_ball_progression'].append(float(ball_prog))
 
+        # Possession/ball-position instrumentation (penetration evidence)
+        bx_mean, bx_poss, poss_frac = _possession_stats(game_states)
+        self._train_log['episode_ball_x_mean'].append(bx_mean)
+        self._train_log['episode_ball_x_poss'].append(bx_poss)
+        self._train_log['episode_poss_frac'].append(poss_frac)
+
         # PPR diagnostics from PassTracker
         pass_stats = stats.get('pass_stats', {})
         self._train_log['episode_pass_attempts'].append(int(pass_stats.get('attempts', 0)))
@@ -646,6 +779,8 @@ class HMARLTrainer:
         self._train_log['episode_r_mid'].append(float(rb_avg.get('r_mid', 0.0)))
         self._train_log['episode_r_low'].append(float(rb_avg.get('r_low', 0.0)))
         self._train_log['episode_r_progression'].append(float(rb_avg.get('r_progression', 0.0)))
+        self._train_log['episode_r_progression_abs'].append(float(rb_avg.get('r_progression_abs', 0.0)))
+        self._train_log['episode_r_mid_abs'].append(float(rb_avg.get('r_mid_abs', 0.0)))
 
         # Action distribution: count of each action across all agents in episode
         all_actions = stats.get('all_actual_actions', [])
@@ -656,10 +791,48 @@ class HMARLTrainer:
                     action_counts[a] += 1
         self._train_log['episode_action_distribution'].append(action_counts)
 
+    def _merge_previous_log(self):
+        """Prepend per-episode arrays from the existing log in this log_dir.
+
+        2026-10-17: every restart of the auto-resume loop re-entered train()
+        with global_step already >= total_timesteps, skipped the episode loop
+        and wrote a fresh, empty log over the previous leg's data — obs101 and
+        obs102 both ended with 0 recorded episodes, destroying the run history.
+        Merging here (plus the guard in _save_training_log) keeps legs additive.
+        """
+        import json as _json
+        path = os.path.join(self.log_dir, 'training_log.json')
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path) as f:
+                old = _json.load(f)
+        except (OSError, ValueError):
+            return
+        if not old.get('episode_rewards'):
+            return
+        merged = 0
+        for k, cur in self._train_log.items():
+            prev = old.get(k)
+            if isinstance(cur, list) and isinstance(prev, list) and prev:
+                cur[:0] = prev
+                merged = max(merged, len(prev))
+        if merged:
+            print(f"Merged {merged} episodes from existing training log in {self.log_dir}")
+
     def _save_training_log(self):
         """Save training log to JSON for visualization."""
         import json as _json
         path = os.path.join(self.log_dir, 'training_log.json')
+        # Never clobber recorded history with an empty log (see _merge_previous_log).
+        if not self._train_log.get('episode_rewards') and os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    if _json.load(f).get('episode_rewards'):
+                        print(f"[WARN] refusing to overwrite non-empty {path} with an empty log")
+                        return
+            except (OSError, ValueError):
+                pass
         # Convert numpy types
         serializable = {}
         for k, v in self._train_log.items():
@@ -695,6 +868,11 @@ class HMARLTrainer:
 
     def train(self):
         """Main training loop."""
+        # Restart of the auto-resume loop after completion: nothing to do, and
+        # running would rewrite the log (2026-10-17). Exit before _init_training_log.
+        if self.global_step >= self.total_timesteps:
+            print(f"Already at target ({self.global_step} >= {self.total_timesteps}) — nothing to do")
+            return
         print(f"HMARL Training | Device: {DEVICE}")
         print(f"Total timesteps: {self.total_timesteps:,}")
         print(f"Log dir: {self.log_dir}")
@@ -705,6 +883,7 @@ class HMARLTrainer:
         self._train_start = start_time
         episode_rewards = []
         self._init_training_log()
+        self._merge_previous_log()
 
         pbar = tqdm(total=self.total_timesteps, desc="Training", unit="step", dynamic_ncols=True) if tqdm else None
         while self.global_step < self.total_timesteps:
@@ -716,14 +895,16 @@ class HMARLTrainer:
             )
             if dump_this_episode:
                 self.env.close()
-                self.env = create_raw_env(render=self.render, write_dumps=True)
+                self.env = create_raw_env(env_name=self.env_name, num_agents=self.num_agents,
+                                          render=self.render, write_dumps=True, rewards=self.rewards)
                 print(f"  [DUMP] Episode {self.episode_count} — dumps enabled")
 
             stats = self.run_episode(training=True)
 
             if dump_this_episode:
                 self.env.close()
-                self.env = create_raw_env(render=self.render, write_dumps=False)
+                self.env = create_raw_env(env_name=self.env_name, num_agents=self.num_agents,
+                                          render=self.render, write_dumps=False, rewards=self.rewards)
                 self._cleanup_dumps()
 
             episode_rewards.append(stats['episode_reward'])
@@ -906,6 +1087,9 @@ class HMARLTrainer:
                         obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
                         sg_t = torch.FloatTensor(sg_embed).unsqueeze(0).to(DEVICE)
                         logits, _ = self.policy(obs_t, sg_t)
+                        if USE_ACTION_MASK:
+                            _mask_t = torch.from_numpy(get_action_mask(game_state)).to(DEVICE)
+                            logits = logits.masked_fill(~_mask_t, -1e9)
                         joint_actions.append(logits.argmax(dim=-1).item())
 
                 step_result = eval_env.step(joint_actions)
@@ -958,7 +1142,11 @@ if __name__ == "__main__":
     parser.add_argument("--dump-freq", type=int, default=DUMP_FREQ,
                         help="Enable dump every N episodes (0=never)")
     parser.add_argument("--scenario", type=str, default="11_vs_11_stochastic",
-                        help="GRF scenario: 11_vs_11_stochastic, academy_single_goal_versus_lazy, academy_empty_goal")
+                        help="GRF scenario: 11_vs_11_stochastic, 11_vs_11_easy_stochastic (bot 0.05), "
+                             "11_vs_11_hard_stochastic (bot 0.95), academy_single_goal_versus_lazy, academy_empty_goal")
+    parser.add_argument("--checkpoint-reward", action="store_true",
+                        help="Add GRF built-in dense checkpoint reward (scoring,checkpoints) — "
+                             "early-phase curriculum; drop it once offense works")
     parser.add_argument("--max-dumps", type=int, default=MAX_DUMPS,
                         help="Max dump files to keep")
 
@@ -974,6 +1162,7 @@ if __name__ == "__main__":
         model_dir=args.model_dir,
         render=args.render,
         scenario=args.scenario,
+        checkpoint_reward=args.checkpoint_reward,
     )
 
     if args.resume:
@@ -992,3 +1181,13 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _shutdown)
 
     trainer.train()
+
+    # Target timesteps reached: signal scripts/train_loop.sh to stop restarting.
+    # (Graceful SIGTERM path above exits before this — loop treats it as stop
+    # only via `docker stop`, otherwise it resumes, by design.)
+    try:
+        os.makedirs(args.log_dir, exist_ok=True)
+        open(os.path.join(args.log_dir, '.DONE'), 'w').close()
+    except OSError:
+        pass
+    print("[DONE] target timesteps reached — checkpoint and run log saved")

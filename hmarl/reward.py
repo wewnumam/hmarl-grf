@@ -31,24 +31,43 @@ from hmarl.policy import (
 # Previous values made shaping ~99% of episode reward (game signal ≈ 1.5%).
 # New balance: game ≈ 71%, shaping ≈ 29%.  r_mid and r_low are non-trivial
 # (29% and 22% of shaping respectively).  See analysis in commit message.
-ALPHA_HIGH = 0.001   # FAI contribution (was 0.05)
-ALPHA_MID = 0.002    # PPR contribution (was 0.05)
+#
+# Rebalance 2026-10-15 (training_log 500-ep analysis): measured per-step
+# r_high was 0.001 (flat baseline, no gradient) and r_mid ≡ 0 (get_ppr
+# collapsed to 0 with no completed pass).  Raised r_high 5× and r_mid 5×
+# against a now-bounded [0,1] success-independent PPR path (see get_ppr).
+ALPHA_HIGH = 0.005   # FAI contribution (was 0.001; 2026-10-15)
+ALPHA_MID = 0.01     # forward-pass share (was 0.002; 2026-10-15)
 ALPHA_LOW = 0.001    # RCI contribution (was 0.02)
-# Ball progression dense reward (v2, 2026-10-13): potential-based, see
-# BallProgressionTracker docstring for why v1 produced no gradient.
-ALPHA_PROG = 0.05    # (was 0.5)
+# Ball progression dense reward (v3, 2026-10-15): potential-based and
+# ownership-ungated, see BallProgressionTracker docstring.
+ALPHA_PROG = 0.15    # (was 0.05; 2026-10-16 obs101: territory fights must pay,
+                     # v3 potential term nets ~0/ep but its per-step variance
+                     # is the only always-on dense gradient — 3x amplification)
 
-# Scale raw GRF game reward (±1 per goal) so it dominates shaping.
-# 3 goals against → -15/ep vs shaping ≈ +6/ep.
+# Scale raw GRF game reward (±1 per goal).
+# obs101 (2026-10-16): previously concede -10/goal (scaled) vs win +10 once —
+# the dominant gradient was "never concede" -> passive defense (poss 9%,
+# ball_x -0.42, GF 0/250).  Now concede -2.5/goal and win +30 so an attacking
+# game can out-earn the concede penalty.
 GAME_SCALE = 5.0
 
 # Game reward modifiers (scale from +1/-1 to meaningful values)
-GAME_WIN = +10.0
+GAME_WIN = +30.0     # (was +10.0; obs101: win must outweigh concede drain)
 GAME_DRAW = 0.0
 GAME_LOSE = -15.0
 
 # Concede penalty: per goal against during episode
-CONCEDE_PENALTY = -2.0
+CONCEDE_PENALTY = -0.5   # (was -2.0; scaled -2.5/goal, was -10/goal)
+
+# Goal scored: per goal FOR during episode (mirror of CONCEDE_PENALTY).
+# 2026-10-17 diagnosis: mid-episode team_reward was hard-coded 0.0, so the only
+# in-episode game signal was the concede penalty — scoring paid nothing until
+# the terminal win/lose bonus, which needs ~10 goals and never fires.  The
+# gradient degenerated to "never concede" -> passive defence (0.17% shot
+# action share, GF 1/200 eps).  Raw +1.0 => +5.0/goal scaled, i.e. 2:1
+# offence:defence against CONCEDE_PENALTY.
+GOAL_REWARD = +1.0
 
 # Maximum possible deviation (diagonal of the pitch)
 D_MAX = 2.24  # sqrt(2^2 + 1.2^2) ≈ 2.33, use 2.24 as practical max
@@ -138,18 +157,25 @@ def compute_fai(
 # Ball Progression Reward (dense signal for moving ball forward)
 # ---------------------------------------------------------------------------
 class BallProgressionTracker:
-    """Track ball possession-progress for dense shaping (v2, potential-based).
+    """Track ball-possession-progress for dense shaping (v3, potential-based, ungated).
 
-    Potential φ(s) = ball_x · [we own the ball]; reward r_t = clip(φ(s_{t+1}) − φ(s_t)).
+    Potential φ(s) = ball_x; reward r_t = clip(φ(s_{t+1}) − φ(s_t)).
 
     Why v1 failed (2026-10-13 diagnosis): v1 rewarded Δx only past a 0.02
     threshold; typical per-step Δx ≈ 0.005, so r_prog fired ~never
     (episode_r_progression ≈ 0.004/episode) and gave PPO zero dense gradient.
     v1 also ignored possession: shoving the ball forward with no control paid
-    the same as a real attack. v2 is dense every step and gates on
-    possession, so turnovers in advanced areas are penalised via the φ drop.
-    As a potential-difference term it does not bias optimal policy
-    (Ng et al. 1999).
+    the same as a real attack.
+
+    Why v2 (ownership gate) failed (2026-10-15 diagnosis, 500-episode run):
+    φ = ball_x × [we own the ball], and possession was so rare that the
+    per-step mean of r_prog stayed ≈ 0.000 for the whole run — the gate
+    switched the dense signal off exactly when the team was defending,
+    which is most of the game.  v3 drops the gate: φ = ball_x is active
+    every step.  Territory loss still pays (opponent driving the ball back
+    drops φ, clipped at −PROG_CLIP), and possession quality shows up as
+    sustained positive Δφ.  As a potential-difference term it does not bias
+    optimal policy (Ng et al. 1999).
     """
     def __init__(self):
         self.reset()
@@ -160,9 +186,7 @@ class BallProgressionTracker:
 
     def update(self, game_state: Dict) -> float:
         """Compute potential-based progression reward for current step."""
-        ball_x = get_ball_position(game_state)[0]
-        owned = 1.0 if game_state.get('ball_owned_team', -1) == 0 else 0.0
-        phi = ball_x * owned
+        phi = get_ball_position(game_state)[0]
 
         if self._prev_phi is None:
             self._prev_phi = phi
@@ -192,6 +216,7 @@ class PassTracker:
         self.pass_attempts = 0
         self.successful_passes = 0
         self.progressive_passes = 0
+        self.forward_failures = 0   # failed passes that advanced the ball (2026-10-15)
         self._last_possessor = -1
         self._last_possessor_pos = None
         self._pass_initiated = False
@@ -228,6 +253,13 @@ class PassTracker:
             elif prev_team == 0 and ball_owned_team != 0:
                 # Pass failed (lost possession) — reset pass tracking
                 self.pass_attempts += 1
+                # Success-independent forward-intent count: a lost pass that
+                # still advanced the ball counts toward the forward share
+                # (keeps r_mid alive when no pass ever completes).
+                if self._pass_start_pos is not None:
+                    ball_x = get_ball_position(game_state)[0]
+                    if ball_x > self._pass_start_pos[0]:
+                        self.forward_failures += 1
                 self._pass_start_pos = None
                 self._last_possessor = -1
 
@@ -255,10 +287,19 @@ class PassTracker:
             self._pass_start_pos = None
 
     def get_ppr(self) -> float:
-        """Get current Progressive Pass Ratio."""
-        if self.successful_passes == 0:
+        """Forward-pass share used by r_mid (reward path only).
+
+        = (progressive passes + forward failed passes) / attempts, bounded [0,1].
+
+        2026-10-15: old definition was P_progressive / P_successful and
+        returned 0 whenever no pass completed — in the 500-episode run that
+        was ~every episode, so r_mid ≡ 0.000 and the mid-level term carried
+        no gradient.  Denominator is now attempts, numerator counts forward
+        intent regardless of outcome.
+        """
+        if self.pass_attempts == 0:
             return 0.0
-        return self.progressive_passes / self.successful_passes
+        return (self.progressive_passes + self.forward_failures) / self.pass_attempts
 
     def get_stats(self) -> Dict[str, int]:
         """Get pass statistics."""
@@ -266,6 +307,7 @@ class PassTracker:
             'attempts': self.pass_attempts,
             'successful': self.successful_passes,
             'progressive': self.progressive_passes,
+            'forward_failures': self.forward_failures,
             'ppr': self.get_ppr(),
         }
 

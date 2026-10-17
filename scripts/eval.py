@@ -35,7 +35,7 @@ from hmarl.utils import (
     ProgressTracker,
 )
 
-from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state
+from hmarl.env import create_raw_env, NUM_AGENTS, extract_game_state, get_action_mask
 from hmarl.policy import (
     HierarchicalController, HierarchicalActorCritic,
     SubGoalEmbedding, SUBGOAL_EMBED_DIM,
@@ -48,6 +48,8 @@ from hmarl.metrics import (
     compute_win_rate, compute_goal_difference,
     team_compactness,
     pass_network_matrix,
+    pass_network_stats,
+    pass_network_cohesion,
     inter_agent_distance_per_line,
     convex_hull_area,
     action_transition_matrix,
@@ -223,6 +225,12 @@ def evaluate_hmarl(
                     obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
                     sg_t = torch.FloatTensor(sg_embed_val).unsqueeze(0).to(DEVICE)
                     logits, _ = policy(obs_t, sg_t)
+                    # Same legal-action mask as training (default ON, see
+                    # ACTION_MASK env var in train.py) — argmax over the
+                    # masked logits never picks an illegal action.
+                    if os.environ.get("ACTION_MASK", "1") != "0":
+                        _mask = torch.from_numpy(get_action_mask(game_state)).to(DEVICE)
+                        logits = logits.masked_fill(~_mask, -1e9)
                     action = logits.argmax(dim=-1).item()
                 joint_actions.append(action)
 
@@ -425,11 +433,22 @@ def evaluate_hmarl(
         # --- Extended metrics and visualizations ---
         # Pass network
         pn = pass_network_matrix(all_game_states_flat, all_actual_actions_flat)
-        if pn.sum() > 0:
+        pn_stats: Dict[str, float] = {}
+        if all_game_states_flat:
+            pn_stats = pass_network_stats(all_game_states_flat, all_actual_actions_flat)
+            pn_stats.update(pass_network_cohesion(pn))
+        # plot even with 0 completed passes (edge-less graph) as long as
+        # there were pass attempts — the metric panel is still informative
+        if pn.sum() > 0 or pn_stats.get('total_pass', 0) > 0:
+            _pn_pos = [gs['left_team'] for gs in all_game_states_flat
+                       if len(gs.get('left_team', [])) >= 11]
+            mean_pos = np.mean(np.asarray(_pn_pos, dtype=float), axis=0) if _pn_pos else None
             plot_pass_network(
                 pn,
                 os.path.join(plots_dir, '13_pass_network.png'),
                 roles=all_roles,
+                positions=mean_pos,
+                stats=pn_stats,
             )
 
         # Inter-agent distance per line
@@ -467,6 +486,8 @@ def evaluate_hmarl(
             if isinstance(v, (np.floating, np.integer)):
                 v = float(v)
             serializable_ext[k] = v
+        for k, v in pn_stats.items():
+            serializable_ext[k] = float(v)
         with open(results_path, 'r') as f:
             existing = json.load(f)
         existing.update(serializable_ext)

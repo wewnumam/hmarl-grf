@@ -1,0 +1,7 @@
+# keep build context small — never bake run artifacts or wheels into the image
+dumps*
+checkpoints*
+*.whl
+*.log
+Chats/
+.git/

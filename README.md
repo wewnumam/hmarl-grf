@@ -415,6 +415,31 @@ pip install -e .
 
 **Note:** GRF does not support native Windows installation. Windows users must use Docker. WSL2 + Docker Desktop is the recommended path.
 
+### Troubleshooting: Docker Build Fails with DNS/Network Errors
+
+`docker compose up -d` can fail during build with errors like `temporary failure in name resolution`, `could not resolve host: ...`, or `failed to fetch` when pulling base images or pip packages. Cause: the Docker daemon uses the host's DNS (often broken/limited inside WSL2 or on restricted networks), so name resolution fails inside the build.
+
+Fix: add public DNS servers to the Docker daemon config.
+
+Write to `/etc/docker/daemon.json` (Linux daemon) or `%USERPROFILE%\.docker\daemon.json` (Docker Desktop on Windows/WSL2):
+
+```json
+{
+  "dns": ["8.8.8.8", "1.1.1.1"]
+}
+```
+
+**Warning:** JSON does not allow comments — any `//` line makes Docker silently ignore the file. Keep it exactly as above.
+
+Then restart the daemon:
+
+```bash
+sudo systemctl restart docker          # Linux
+# Docker Desktop: quit and restart the app, or "Restart Docker" from tray menu
+```
+
+Verify with `docker info | grep -A2 "DNS Servers"`, then rebuild: `docker compose build --no-cache`.
+
 ## Training
 
 ### HMARL (Proposed)
