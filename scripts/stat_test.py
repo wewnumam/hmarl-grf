@@ -203,22 +203,17 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str 
         from hmarl.ippo import FlatActorCritic
         model = FlatActorCritic().to(DEVICE)
     elif algorithm == "shppo":
-        from hmarl.shppo import SharedActorCritic
-        model = SharedActorCritic().to(DEVICE)
+        from hmarl.shppo import HeterogeneousActorCritic
+        model = HeterogeneousActorCritic().to(DEVICE)
     elif algorithm == "mappo":
-        from hmarl.mappo import DecentralizedActor
-        model = DecentralizedActor().to(DEVICE)
+        from hmarl.mappo import SharedActorCritic
+        model = SharedActorCritic().to(DEVICE)
     else:
         env.close()
         return {}
 
     ckpt = load_ckpt(model_path, map_location='cpu')
-    if algorithm == "mappo":
-        # MAPPO saves 'policy_state' in 'mappo_checkpoint.pt'
-        mkey = 'actor_state' if 'actor_state' in ckpt else 'policy_state'
-        model.load_state_dict(ckpt[mkey])
-    else:
-        model.load_state_dict(ckpt['policy_state'])
+    model.load_state_dict(ckpt['policy_state'])
     model.eval()
 
     controller = HierarchicalController()
@@ -261,7 +256,10 @@ def evaluate_flat(algorithm: str, num_episodes: int, seed: int, model_path: str 
                 obs_vec = extract_obs_vector(game_state, i)
                 obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
                 with torch.no_grad():
-                    logits, _ = model(obs_t) if algorithm != "mappo" else (model(obs_t), None)
+                    if algorithm == "mappo":
+                        logits = model.policy_head(model.actor(obs_t))
+                    else:
+                        logits, _ = model(obs_t)
                     joint_actions.append(logits.argmax(dim=-1).item())
 
             step_result = env.step(joint_actions)
@@ -515,6 +513,20 @@ def main():
             if alg == "hmarl":
                 hmarl_win_rates = seed_win_rates
                 hmarl_gds = seed_gd
+
+            # Incremental flush: a multi-hour run that is interrupted (host
+            # reboot, OOM, manual stop) otherwise loses every finished
+            # algorithm, since the JSON is only written at the very end.
+            with open(args.output, 'w') as f:
+                json.dump({'meta': run_metadata(script="scripts/stat_test.py",
+                                                train_time_s=round(time.time() - main_start, 2),
+                                                algorithms=args.algorithms),
+                           'config': {'seeds': args.seeds, 'timesteps': args.timesteps,
+                                      'eval_episodes': args.eval_episodes,
+                                      'base_seed': args.base_seed, 'partial': True,
+                                      'algorithms_done': list(all_results.keys())},
+                           'results': all_results, 'statistical_tests': []}, f, indent=2)
+                print(f"    [partial results flushed: {list(all_results.keys())}]")
 
     # Statistical tests
     print(f"\n{'='*60}")

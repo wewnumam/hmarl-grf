@@ -74,14 +74,27 @@ GAE_LAMBDA = 0.99      # GAE lambda (0.95 → 0.99, 2026-10-15: 0.95^100 ≈ 0.0
                        # so credit from concede/terminal events (every ~330 steps)
                        # died before reaching the decisions that caused them)
 CLIP_RANGE = 0.2      # PPO clip range
-ENT_COEF = 0.01       # Entropy coefficient (c2)
+ENT_COEF = 0.03       # Entropy coefficient (c2)
+                      # 2026-10-18: 0.01 -> 0.03.  obs105 collapsed to a
+                      # near-deterministic policy (entropy 2.31 -> 0.53, min
+                      # 0.88; release_dir 27.8% of steps vs 8.6% before) once
+                      # the reward stopped moving — obs103/obs104 held ~2.4 at
+                      # 0.01, so the collapse came from the dead gradient, not
+                      # from this constant being wrong per se.  Raised anyway
+                      # as a guard while the new progression signal beds in.
 VF_COEF = 0.5         # Value loss coefficient (c1)
 MINIBATCH_SIZE = 64
 NUM_EPOCHS = 4        # PPO epochs per update
 TOTAL_TIMESTEPS = 3_000_000  # 2-5 juta (thesis)
-EPISODE_MAX_STEPS = 3000   # GRF half = 3000 timesteps
-LOG_FREQ = 50              # TensorBoard scalars + print every N episodes
-SAVE_FREQ = 50             # Checkpoint + eval every N episodes (1000-ep run: 20 saves, hard crash loses ≤50 ep ≈ 2.6h)
+# 2026-10-18: 3000 -> 1500 (leg 5) -> back to 3000 (leg 6).
+# The halving was meant to double terminal-reward density, but the obs105 run
+# showed it bought nothing and cost a lot: normalised per 1000 env steps the
+# reward went -6.34 -> -10.96 (worse), and 1500 steps leaves too little time to
+# build an attack from our own half.  The apparent GA 8.06 -> 3.70 improvement
+# was pure horizon arithmetic (2.69 -> 2.47 per 1k steps).
+EPISODE_MAX_STEPS = 3000
+LOG_FREQ = 25              # TensorBoard scalars + print every N episodes
+SAVE_FREQ = 25             # Checkpoint + eval every N episodes (1000-ep run: 20 saves, hard crash loses ≤50 ep ≈ 2.6h)
 NUM_EVAL_EPISODES = 10     # Episodes per mid-training eval
 DUMP_FREQ = 500          # Enable dump every N episodes
 MAX_DUMPS = 10            # Keep at most N dump files
@@ -188,6 +201,14 @@ class RolloutBuffer:
         for idx in self.agent_buffer_indices:
             if idx < len(self.rewards):
                 self.rewards[idx] = reward_per_agent
+
+    def add_timestep_reward(self, extra_reward_per_agent: float):
+        """Add a bonus (e.g. the terminal win/lose reward) on top of the
+        per-step reward already stored for the current timestep, instead of
+        overwriting it."""
+        for idx in self.agent_buffer_indices:
+            if idx < len(self.rewards):
+                self.rewards[idx] += extra_reward_per_agent
 
     def compute_gae(
         self,
@@ -542,6 +563,16 @@ class HMARLTrainer:
         # Apply terminal reward to episode total and breakdown
         episode_reward += terminal_reward
         breakdown_sums['game_reward'] = breakdown_sums.get('game_reward', 0.0) + terminal_reward
+
+        # 2026-10-17: the terminal reward was added ONLY to the episode total
+        # and the breakdown dict — it never reached the rollout buffer, so the
+        # win/lose bonus (GAME_WIN=+30) produced no gradient at all.  Measured:
+        # training_log update_value_loss ~0.015 against a reward std of 6.6
+        # (critic never had to predict the outcome) and obs103 scored 1 goal in
+        # 902 conceded while reward improved.  Write it into the last transition
+        # of every agent, exactly like the per-step rewards above.
+        if training and self.buffer.agent_buffer_indices:
+            self.buffer.add_timestep_reward(terminal_reward / self.num_agents)
 
         # ---- PPO Update ----
         if training and len(self.buffer.observations) > 0:
@@ -1056,7 +1087,10 @@ class HMARLTrainer:
         self.policy.eval()
         self.subgoal_embedding.eval()
 
-        eval_env = create_raw_env(render=False)
+        # Eval on the SAME scenario as training: a curriculum run (bot 0.05,
+        # checkpoint reward) is meaningless if evaluated against bot 1.0.
+        eval_env = create_raw_env(env_name=self.env_name, num_agents=self.num_agents,
+                                  render=False)
         controller = HierarchicalController()
         expert = ExpertPolicyAllAgents()
 

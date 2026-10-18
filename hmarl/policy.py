@@ -46,6 +46,16 @@ SUBGOALS = {
 NUM_SUBGOALS = 5
 SUBGOAL_EMBED_DIM = 16  # Embedding dimension for sub-goal
 
+# 2026-10-17: the sub-goal must actually steer the low-level policy, otherwise
+# the hierarchy is decorative and RCI measures nothing.  Measured on the obs103
+# checkpoint: swapping the sub-goal input moved the action distribution by
+# Jensen-Shannon 4e-5..4e-4 with only 2.5-4.3% argmax flips.  Root cause: the
+# embedding vector has norm ~4.2 while the 165-dim observation has norm ~23.6,
+# so the shared layers can ignore it.  One scale factor (single choke point,
+# both rollout sampling and the PPO update read embeddings through here) makes
+# the sub-goal comparable in magnitude to the observation.
+SUBGOAL_SCALE = 3.0
+
 
 # ---------------------------------------------------------------------------
 # High-Level Policy (Rule-Based)
@@ -101,6 +111,13 @@ class MidLevelPolicy:
     DEFENSIVE_ZONE_X = -0.2
     ATTACKING_ZONE_X = 0.3
     WING_THRESHOLD_Y = 0.15
+    # 2026-10-17: clearance used to trigger whenever ball_x < -0.3, which in
+    # the measured leg-3/leg-4 rollouts covered 68% of ALL steps for
+    # CB/LB/RB/CM — seven players permanently booting the ball in their own
+    # third while the ball's median x was -0.53. Clearance is now restricted to
+    # the own box only (same boundary the GK penalty uses in hmarl/reward.py),
+    # so defenders/midfielders circulate the ball instead of clearing it.
+    CLEARANCE_ZONE_X = -0.7
 
     def decide(self, game_state: Dict, player_idx: int, macro_strategy: int) -> int:
         """Select sub-goal for a specific player based on role and macro strategy.
@@ -113,14 +130,14 @@ class MidLevelPolicy:
         """
         role = get_player_role(game_state, 'left', player_idx)
         ball_pos = get_ball_position(game_state)
-        ball_in_defense = ball_pos[0] < -0.3
+        ball_in_box = ball_pos[0] < self.CLEARANCE_ZONE_X
 
         if role == ROLE_GK:
             return SUBGOAL_ZONAL_MARKING
 
         # Defensive roles: CB, LB, RB
         if role in (ROLE_CB, ROLE_LB, ROLE_RB):
-            if ball_in_defense:
+            if ball_in_box:
                 return SUBGOAL_CLEARANCE
             if macro_strategy in (STRATEGY_HIGH_PRESSING, STRATEGY_COUNTER_ATTACK):
                 return SUBGOAL_ZONAL_MARKING
@@ -131,7 +148,7 @@ class MidLevelPolicy:
         # (no possession) and possession stayed at 9%.  Now: contest the ball
         # when pressing, circulate it when we have it, clear only near our box.)
         if role in (ROLE_DM, ROLE_CM, ROLE_AM):
-            if ball_in_defense:
+            if ball_in_box:
                 return SUBGOAL_CLEARANCE
             if macro_strategy == STRATEGY_HIGH_PRESSING:
                 return SUBGOAL_MAN_MARKING
@@ -168,7 +185,7 @@ class SubGoalEmbedding(nn.Module):
         """
         if subgoal.dim() == 1:
             subgoal = subgoal.unsqueeze(1)
-        return self.embedding(subgoal).squeeze(1)
+        return self.embedding(subgoal).squeeze(1) * SUBGOAL_SCALE
 
 
 class HierarchicalActorCritic(nn.Module):

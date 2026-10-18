@@ -22,6 +22,11 @@ while true; do
   rm -f "$DONE"
   CMD=(python3 -u scripts/train.py --timesteps "$TSTEPS"
        --log-dir "$LOG_DIR" --model-dir "$MODEL_DIR" --dump-freq 0)
+  # Curriculum passthrough: SCENARIO=11_vs_11_easy_stochastic (bot 0.05) opens
+  # the goal signal; CHECKPOINT_REWARD=1 adds GRF's 10-zone dense progress
+  # reward. Drop both once offense works (see compose env).
+  [ -n "${SCENARIO:-}" ] && CMD+=(--scenario "$SCENARIO")
+  [ "${CHECKPOINT_REWARD:-0}" = "1" ] && CMD+=(--checkpoint-reward)
   if [ -f "$CKPT" ]; then
     CMD+=(--resume "$CKPT")
   elif [ -n "$INIT_CKPT" ] && [ -f "$INIT_CKPT" ]; then

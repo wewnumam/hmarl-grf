@@ -73,6 +73,14 @@ class SharedActorCritic(nn.Module):
         value = self.critic(state).squeeze(-1)
         return action, dist.log_prob(action), dist.entropy(), value
 
+    def forward(self, obs, state=None):
+        """obs: (B, obs_dim), state: (B, state_dim) -> (logits, values)."""
+        logits = self.policy_head(self.actor(obs))
+        if state is None:
+            state = obs
+        values = self.critic(state).squeeze(-1)
+        return logits, values
+
 
 class MAPPORolloutBuffer:
     """Rollout buffer with global state for centralized critic."""

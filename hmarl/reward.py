@@ -41,7 +41,12 @@ ALPHA_MID = 0.01     # forward-pass share (was 0.002; 2026-10-15)
 ALPHA_LOW = 0.001    # RCI contribution (was 0.02)
 # Ball progression dense reward (v3, 2026-10-15): potential-based and
 # ownership-ungated, see BallProgressionTracker docstring.
-ALPHA_PROG = 0.15    # (was 0.05; 2026-10-16 obs101: territory fights must pay,
+# 2026-10-18: φ is two-sided ball_x (the max(0,·) gate tried on leg 5 died
+# instantly — see BallProgressionTracker.update).  Bound rule: a full episode
+# of forward grinding must not out-earn one goal.  Max |φ| swing per episode is
+# the pitch length 2.0, GOAL_REWARD*GAME_SCALE = 25.0, so 3.0 caps grinding at
+# ≈6.0 (for the whole episode) vs a 25.0 goal — strong but unfarmable.
+ALPHA_PROG = 3.0    # (was 0.05; 2026-10-16 obs101: territory fights must pay,
                      # v3 potential term nets ~0/ep but its per-step variance
                      # is the only always-on dense gradient — 3x amplification)
 
@@ -67,7 +72,11 @@ CONCEDE_PENALTY = -0.5   # (was -2.0; scaled -2.5/goal, was -10/goal)
 # gradient degenerated to "never concede" -> passive defence (0.17% shot
 # action share, GF 1/200 eps).  Raw +1.0 => +5.0/goal scaled, i.e. 2:1
 # offence:defence against CONCEDE_PENALTY.
-GOAL_REWARD = +1.0
+# 2026-10-18: +1.0 -> +5.0 raw (= +25.0 scaled).  At the +1.0 setting the
+# conceded-goal drain (−20/ep) plus the terminal loss (−15/ep) still dominated
+# every attack-side signal, and obs104 scored 0 goals in 100 episodes.  A goal
+# must now clearly outweigh the retentional cost of getting into position.
+GOAL_REWARD = 5.0
 
 # Maximum possible deviation (diagonal of the pitch)
 D_MAX = 2.24  # sqrt(2^2 + 1.2^2) ≈ 2.33, use 2.24 as practical max
@@ -186,6 +195,19 @@ class BallProgressionTracker:
 
     def update(self, game_state: Dict) -> float:
         """Compute potential-based progression reward for current step."""
+        # 2026-10-18 (second attempt — the first one was WRONG): potential is
+        # plain ball_x again, two-sided over the whole pitch.
+        # Attempt 1 used φ = max(0, ball_x) to stop penalising own-half
+        # possession (obs104 was deeper than random: ball_x −0.628 vs −0.378).
+        # That gate backfired badly on obs105: the policy parked at
+        # ball_x ≈ −0.19 and never pushed past the midline, so φ stayed 0 for
+        # the entire run, r_progression paid +0.00004/ep (dead), and with the
+        # only live signal being "don't concede" the policy collapsed —
+        # entropy 2.31 → 0.53 and 0 shots in 8 greedy episodes.  A gate AT the
+        # policy's operating point is a flat region, not an incentive.
+        # Two-sided φ(s')−φ(s) still pays forward in the own half (so the push
+        # toward the midline exists) and cancels over oscillation, so it cannot
+        # be farmed; only the ALPHA_PROG weight needs bounding (see above).
         phi = get_ball_position(game_state)[0]
 
         if self._prev_phi is None:
@@ -287,19 +309,23 @@ class PassTracker:
             self._pass_start_pos = None
 
     def get_ppr(self) -> float:
-        """Forward-pass share used by r_mid (reward path only).
+        """Successful progressive-pass share used by r_mid (reward path only).
 
-        = (progressive passes + forward failed passes) / attempts, bounded [0,1].
+        = progressive passes / attempts, bounded [0,1].
 
-        2026-10-15: old definition was P_progressive / P_successful and
-        returned 0 whenever no pass completed — in the 500-episode run that
-        was ~every episode, so r_mid ≡ 0.000 and the mid-level term carried
-        no gradient.  Denominator is now attempts, numerator counts forward
-        intent regardless of outcome.
+        2026-10-15: denominator changed from P_successful to attempts, because
+        no pass ever completed early in training and r_mid was identically 0.
+        2026-10-17: that fallback also added `forward_failures` to the
+        numerator, i.e. it paid for failed forward passes.  Measured on the
+        leg-3 run: corr(r_mid, goals_against) = +0.001 while r_mid averaged
+        +8.78 per episode — a subsidy uncorrelated with any outcome, which
+        simply rewards hoofing the ball forward.  Numerator is now successful
+        progressive passes only; attempts stays as the denominator so the
+        value is bounded and cannot divide by zero.
         """
         if self.pass_attempts == 0:
             return 0.0
-        return (self.progressive_passes + self.forward_failures) / self.pass_attempts
+        return self.progressive_passes / self.pass_attempts
 
     def get_stats(self) -> Dict[str, int]:
         """Get pass statistics."""

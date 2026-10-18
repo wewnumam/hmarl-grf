@@ -12,10 +12,16 @@ services:
     restart: on-failure
     environment:
       DISPLAY: host.docker.internal:0.0
-      TSTEPS: ${TSTEPS:-900000}
-      LOG_DIR: ${LOG_DIR:-dumps_obs103}
-      MODEL_DIR: ${MODEL_DIR:-checkpoints_obs103}
-      INIT_CKPT: ${INIT_CKPT:-checkpoints_obs102/hmarl_model.pt}
+      TSTEPS: ${TSTEPS:-1650000}
+      LOG_DIR: ${LOG_DIR:-dumps_obs106}
+      MODEL_DIR: ${MODEL_DIR:-checkpoints_obs106}
+      # leg 6: warm-start from obs105 (its defensive gains are real: GA 1.0/ep
+      # greedy vs 7.6 random, ball_x -0.192 vs -0.375).  The stall was the
+      # dead max(0, ball_x) gate, now reverted to two-sided.  Also: horizon
+      # back to 3000, ENT_COEF 0.03.
+      INIT_CKPT: ${INIT_CKPT:-checkpoints_obs105/hmarl_model.pt}
+      SCENARIO: ${SCENARIO:-11_vs_11_easy_stochastic}
+      CHECKPOINT_REWARD: ${CHECKPOINT_REWARD:-1}
     volumes:
       - .:/gfootball
       - /tmp/.X11-unix:/tmp/.X11-unix:rw

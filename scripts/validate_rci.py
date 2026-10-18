@@ -259,6 +259,7 @@ def sensitivity_analysis(
     seed: int = 42,
     base_thresholds: Dict[str, float] = None,
     variations: List[Dict[str, float]] = None,
+    model_path: str = None,
 ) -> Dict:
     """Sensitivity of RCI to expert policy threshold variations.
 
@@ -303,7 +304,7 @@ def sensitivity_analysis(
         DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Load trained HMARL model
-        ckpt_path = "checkpoints/hmarl_model.pt"
+        ckpt_path = model_path or "checkpoints/hmarl_model.pt"
         if not os.path.exists(ckpt_path):
             return {
                 'status': 'skipped',
@@ -686,9 +687,8 @@ def run_sensitivity_from_checkpoint(model_path: str, output_path: str, n_episode
         from hmarl.expert import ExpertPolicyAllAgents
         from hmarl.policy import HierarchicalActorCritic, HierarchicalController, SubGoalEmbedding, SUBGOAL_EMBED_DIM
         from hmarl.rci import compute_rci
-        from hmarl.utils import set_seed, extract_obs_vector, load_ckpt
+        from hmarl.utils import set_seed, extract_obs_vector, load_ckpt, OBS_DIM, HIDDEN_DIM, HEAD_DIM
 
-        HIDDEN_DIM, HEAD_DIM, OBS_DIM = 256, 128, 115
         EPISODE_MAX_STEPS = 3000
         DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -746,6 +746,7 @@ def run_sensitivity_from_checkpoint(model_path: str, output_path: str, n_episode
             base_rci_strict=base_rci['rci_strict'],
             n_episodes=n_episodes,
             seed=seed,
+            model_path=model_path,
         )
 
     except ImportError as e:
