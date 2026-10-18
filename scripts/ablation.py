@@ -27,6 +27,9 @@ import traceback
 from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Own dir too: ablation.py imports stat_test as a sibling module, and the
+# battery runner may only put the repo root on PYTHONPATH.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 import torch
