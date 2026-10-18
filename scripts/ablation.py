@@ -50,10 +50,17 @@ from hmarl.metrics import compute_win_rate, compute_goal_difference, compute_all
 from hmarl.rci import compute_rci
 from hmarl.utils import (
     set_seed, extract_obs_vector, OBS_DIM, HIDDEN_DIM, HEAD_DIM,
-    ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker, cleanup_temp_dirs,
+    ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker, cleanup_own_temp,
     load_ckpt,
 )
 from hmarl.run_logging import run_metadata
+
+# Reuse the single-source-of-truth trainer + evaluator from stat_test: ablation
+# arms only swap hooks (reward fn / sub-goal conditioning / expert), never the
+# PPO hyper-parameters, so no stale copy of the trainer can drift.
+from stat_test import (
+    train_hmarl, evaluate_hmarl_from_checkpoint,
+)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -81,8 +88,12 @@ def make_custom_reward(
     """Create a reward function with specified components enabled/disabled and custom alphas."""
     from hmarl.reward import compute_fai, PassTracker, RCITracker, BallProgressionTracker, get_player_position, get_ball_position, GK_BOX_X, GK_BOX_Y
     def custom_reward(game_reward, game_state, actual_actions, ideal_actions,
-                      pass_tracker, rci_tracker, num_agents=11,
-                      ball_progression_tracker=None):
+                      pass_tracker, rci_tracker, num_agents=NUM_AGENTS,
+                      ball_progression_tracker=None,
+                      enable_fai_=None, enable_ppr_=None, enable_rci_=None,
+                      **kwargs):
+        # The trainer forwards its own enable_* flags; the arm's flags live in
+        # this closure and deliberately win, so the passed values are ignored.
         # FAI
         rho_fa = compute_fai(game_state, num_agents) if enable_fai else 0.0
 
@@ -408,19 +419,29 @@ def main():
     parser.add_argument("--timesteps", type=int, default=300_000, help="Training timesteps per config")
     parser.add_argument("--eval-episodes", type=int, default=50, help="Evaluation episodes per config")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed-offset", type=int, default=0,
+                        help="Shift the seed (parallel shards)")
+    parser.add_argument("--temp-root", type=str, default="ablation_temp",
+                        help="Per-shard temp dir (parallel shards must not share one)")
     parser.add_argument("--configs", nargs="+", default=None,
                         help="Specific configs to run (default: all)")
     parser.add_argument("--output", type=str, default="evaluation_results/ablation_results.json")
+    parser.add_argument("--merge-inputs", nargs="+", default=None,
+                        help="Merge shard JSONs into --output instead of training")
     parser.add_argument("--quick", action="store_true",
                         help="Quick mode: 100k steps, 20 eval episodes")
     args = parser.parse_args()
+
+    if args.merge_inputs:
+        merge_shards(args.merge_inputs, args.output)
+        return
 
     if args.quick:
         args.timesteps = 100_000
         args.eval_episodes = 20
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    os.makedirs("ablation_temp", exist_ok=True)
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    os.makedirs(args.temp_root, exist_ok=True)
 
     configs_to_run = args.configs if args.configs else list(ABLATION_CONFIGS.keys())
     results = {}
@@ -442,32 +463,41 @@ def main():
             config = ABLATION_CONFIGS[config_name]
             print(f"\n--- {config_name}: {config['description']} ---")
 
-            train_result = train_hmarl_config(
-                config_name=config_name,
+            # Same trainer as the main runs: only the ablation hooks differ, so
+            # gamma / entropy / GAE / clipping stay identical across arms.
+            train_fn = make_custom_reward(**config['mod_reward_kwargs'])
+            ckpt = train_hmarl(
                 timesteps=args.timesteps,
-                seed=args.seed,
-                reward_fn=config['reward_fn'],
+                seed=args.seed + args.seed_offset,
+                output_dir=os.path.join(args.temp_root, config_name),
+                reward_fn=train_fn,
                 flat_policy=config['flat_policy'],
                 random_expert=config['random_expert'],
             )
 
-            eval_result = evaluate_ablation_config(
-                ckpt_path=train_result['checkpoint'],
+            eval_result = evaluate_hmarl_from_checkpoint(
+                ckpt_path=ckpt,
                 num_episodes=args.eval_episodes,
-                seed=args.seed + 1000,
+                seed=args.seed + args.seed_offset + 1000,
                 flat_policy=config['flat_policy'],
                 random_expert=config['random_expert'],
             )
 
             results[config_name] = {
                 'description': config['description'],
-                'train': train_result,
-                'eval': eval_result,
+                'wins': [eval_result['win_rate']],
+                'rewards': [eval_result['cumulative_reward']],
+                'game_rewards': [eval_result['avg_game_reward']],
+                'goal_differences': [eval_result['goal_difference']],
+                'rci': [eval_result['rci_cat']],
+                'fai': [eval_result['fai_mean']],
+                'checkpoints': [ckpt],
             }
 
             print(f"  Result: WR={eval_result['win_rate']:.1f}% | "
-                  f"Reward={eval_result['avg_reward']:.2f} | "
-                  f"GD={eval_result['goal_difference']}")
+                  f"Reward={eval_result['cumulative_reward']:.2f} | "
+                  f"GD={eval_result['goal_difference']} | "
+                  f"RCI={eval_result['rci_cat']:.4f}")
         except Exception:
             traceback.print_exc()
             print(f"  FAILED: {config_name}, skipping.")
@@ -482,13 +512,12 @@ def main():
     print(f"  {'Config':<25} {'Win Rate':>10} {'Avg Reward':>12} {'Goal Diff':>10}")
     print(f"  {'-'*57}")
 
-    full_hmarl_wr = results.get('full_hmarl', {}).get('eval', {}).get('win_rate', 0)
+    full_hmarl_wr = results.get('full_hmarl', {}).get('wins', [0])[0]
 
     for name, res in results.items():
-        ev = res.get('eval', {})
-        wr = ev.get('win_rate', 0)
-        rw = ev.get('avg_reward', 0)
-        gd = ev.get('goal_difference', 0)
+        wr = res.get('wins', [0])[0]
+        rw = res.get('rewards', [0])[0]
+        gd = res.get('goal_differences', [0])[0]
         delta = wr - full_hmarl_wr if name != 'full_hmarl' else 0
         delta_str = f" ({delta:+.1f}%)" if name != 'full_hmarl' else ""
         print(f"  {name:<25} {wr:>9.1f}% {rw:>12.2f} {gd:>10}{delta_str}")
@@ -505,14 +534,17 @@ def main():
         'config': {
             'timesteps': args.timesteps,
             'eval_episodes': args.eval_episodes,
-            'seed': args.seed,
+            'base_seed': args.seed,
+            'seed_offset': args.seed_offset,
+            'seeds': 1,
+            'note': 'seeds = independent training runs (pooled from shards)',
         },
         'results': results,
         'summary': {
             name: {
-                'win_rate': res['eval']['win_rate'],
-                'avg_reward': res['eval']['avg_reward'],
-                'goal_difference': res['eval']['goal_difference'],
+                'win_rate': res['wins'][0],
+                'avg_reward': res['rewards'][0],
+                'goal_difference': res['goal_differences'][0],
             }
             for name, res in results.items()
         },
@@ -523,7 +555,8 @@ def main():
     print(f"\nResults saved to {args.output}")
     print(f"Total time: {time.time()-total_start:.0f}s")
 
-    cleanup_temp_dirs(['ablation_temp'])
+    # Only our own temp root: parallel shards each own one (see --temp-root).
+    cleanup_own_temp(args.temp_root)
 
 
 if __name__ == "__main__":

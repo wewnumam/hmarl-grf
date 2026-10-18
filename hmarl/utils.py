@@ -274,6 +274,19 @@ def cleanup_temp_dirs(base_dirs=None):
             print(f"  Cleaned up: {d}/")
 
 
+def cleanup_own_temp(subdir):
+    """Remove ONE subdirectory, leaving siblings alone.
+
+    Needed when several training processes share a temp root (parallel seeds):
+    the root-wide cleanup_temp_dirs() would delete a sibling process's working
+    directory mid-run, which shows up as a spurious FileNotFoundError at
+    checkpoint save time.
+    """
+    if subdir and os.path.isdir(subdir):
+        shutil.rmtree(subdir, ignore_errors=True)
+        print(f"  Cleaned up: {subdir}/")
+
+
 # ---------------------------------------------------------------------------
 # Centralized obs (MAPPO / SHPPO shared)
 # ---------------------------------------------------------------------------

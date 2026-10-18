@@ -31,7 +31,7 @@ from hmarl.rci import compute_rci
 from hmarl.utils import (
     set_seed, extract_obs_vector, OBS_DIM, HIDDEN_DIM, HEAD_DIM,
     ACTION_SPACE_SIZE, EPISODE_MAX_STEPS, ProgressTracker,
-    cleanup_temp_dirs, load_ckpt,
+    cleanup_temp_dirs, cleanup_own_temp, load_ckpt,
 )
 from hmarl.run_logging import run_metadata
 
@@ -47,8 +47,15 @@ except ImportError:
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def train_hmarl(timesteps: int, seed: int, output_dir: str) -> str:
-    """Train HMARL for one seed. Returns checkpoint path."""
+def train_hmarl(timesteps: int, seed: int, output_dir: str,
+                reward_fn: callable = None,
+                flat_policy: bool = False,
+                random_expert: bool = False) -> str:
+    """Train HMARL for one seed. Returns checkpoint path.
+
+    reward_fn / flat_policy / random_expert are ablation hooks on HMARLTrainer
+    (see scripts/ablation.py); all three default to the full HMARL config.
+    """
     import train as train_mod
     set_seed(seed)
     trainer = train_mod.HMARLTrainer(
@@ -56,6 +63,10 @@ def train_hmarl(timesteps: int, seed: int, output_dir: str) -> str:
         log_dir=output_dir,
         model_dir=os.path.join(output_dir, "checkpoints"),
     )
+    if reward_fn is not None:
+        trainer.reward_fn = reward_fn
+    trainer.flat_policy = flat_policy
+    trainer.random_expert = random_expert
     trainer.train()
     return os.path.join(trainer.model_dir, "hmarl_model.pt")
 
@@ -82,8 +93,15 @@ def train_flat(algorithm: str, timesteps: int, seed: int, output_dir: str) -> st
     return os.path.join(output_dir, f"{algorithm}_model.pt")
 
 
-def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int) -> Dict:
-    """Evaluate HMARL model from checkpoint."""
+def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int,
+                                   flat_policy: bool = False,
+                                   random_expert: bool = False) -> Dict:
+    """Evaluate HMARL model from checkpoint.
+
+    flat_policy / random_expert must mirror the training arm: a policy trained
+    without sub-goal conditioning has to be evaluated without it too, otherwise
+    the ablation measures the wrong thing.
+    """
     set_seed(seed)
     policy = HierarchicalActorCritic(
         obs_dim=OBS_DIM, subgoal_embed_dim=SUBGOAL_EMBED_DIM,
@@ -130,11 +148,22 @@ def evaluate_hmarl_from_checkpoint(ckpt_path: str, num_episodes: int, seed: int)
         while not done and step < EPISODE_MAX_STEPS:
             macro = controller.get_macro_strategy(game_state)
             sub_goals = controller.get_sub_goals(game_state, macro)
-            ideal = expert.get_ideal_actions(game_state, sub_goals, macro)
+            if random_expert:
+                ideal = [np.random.randint(0, 18) for _ in range(NUM_AGENTS)]
+            else:
+                ideal = expert.get_ideal_actions(game_state, sub_goals, macro)
 
             joint_actions = []
             for i in range(NUM_AGENTS):
                 obs_vec = extract_obs_vector(game_state, i)
+                if flat_policy:
+                    sg_emb = np.zeros(SUBGOAL_EMBED_DIM, dtype=np.float32)
+                    with torch.no_grad():
+                        obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
+                        sg_t = torch.FloatTensor(sg_emb).unsqueeze(0).to(DEVICE)
+                        logits, _ = policy(obs_t, sg_t)
+                        joint_actions.append(logits.argmax(dim=-1).item())
+                    continue
                 with torch.no_grad():
                     sg_emb = subgoal_emb(torch.LongTensor([sub_goals[i]]).to(DEVICE)).cpu().numpy().flatten()
                     obs_t = torch.FloatTensor(obs_vec).unsqueeze(0).to(DEVICE)
@@ -370,6 +399,70 @@ def evaluate_random(num_episodes: int, seed: int) -> Dict:
     return metrics
 
 
+def merge_shards(paths: List[str], output: str) -> None:
+    """Pool seed-level results from several shard JSONs and re-run the tests.
+
+    Parallel shards (--seed-offset) each write their own file; the merged file
+    is what the statistics and validate_rci.py --load-results consume.
+    """
+    pooled: Dict[str, Dict] = {}
+    base_seed, timesteps, eval_episodes = None, None, None
+
+    for p in paths:
+        with open(p) as f:
+            data = json.load(f)
+        cfg = data.get('config', {})
+        base_seed = cfg.get('base_seed', base_seed)
+        timesteps = cfg.get('timesteps', timesteps)
+        eval_episodes = cfg.get('eval_episodes', eval_episodes)
+        for alg, res in data.get('results', {}).items():
+            tgt = pooled.setdefault(alg, {})
+            for k, v in res.items():
+                if isinstance(v, list):
+                    tgt[k] = tgt.get(k, []) + v
+                else:
+                    tgt[k] = v
+
+    # Recompute the scalar aggregates over the pooled seed lists.
+    for alg, res in pooled.items():
+        for list_key, mean_key, std_key in (
+                ('win_rates', 'win_rate_mean', 'win_rate_std'),
+                ('goal_differences', 'goal_difference_mean', 'goal_difference_std')):
+            vals = res.get(list_key)
+            if vals:
+                res[mean_key] = float(np.mean(vals))
+                res[std_key] = float(np.std(vals))
+
+    n = max((len(r.get('goal_differences', [])) for r in pooled.values()), default=0)
+    stat_tests = []
+    hmarl_gds = pooled.get('hmarl', {}).get('goal_differences', [])
+    for alg, res in pooled.items():
+        if alg != 'hmarl':
+            stat_tests.append(run_statistical_test(
+                hmarl_gds, res.get('goal_differences', []), alg))
+
+    out = {
+        'meta': run_metadata(script="scripts/stat_test.py (merged shards)",
+                             algorithms=list(pooled.keys())),
+        'config': {'seeds': n, 'timesteps': timesteps, 'eval_episodes': eval_episodes,
+                   'base_seed': base_seed, 'eval_only': False, 'model_path': None,
+                   'note': 'seeds = independent training runs (pooled from shards)',
+                   'shards': paths},
+        'results': pooled,
+        'statistical_tests': stat_tests,
+    }
+    with open(output, 'w') as f:
+        json.dump(out, f, indent=2)
+
+    print(f"Merged {len(paths)} shards -> {output}")
+    for alg, res in pooled.items():
+        print(f"  {alg:<8} n={len(res.get('goal_differences', []))} "
+              f"GD={res.get('goal_difference_mean')} RCI={res.get('rci')}")
+    for t in stat_tests:
+        print(f"  HMARL vs {t['baseline']}: {t.get('test')} "
+              f"p={t.get('p_value')} significant={t.get('significant')}")
+
+
 def run_statistical_test(hmarl_values: List[float], baseline_values: List[float],
                          baseline_name: str) -> Dict:
     """Run Mann-Whitney U test comparing HMARL to a baseline."""
@@ -409,6 +502,13 @@ def main():
     parser.add_argument("--timesteps", type=int, default=3_000_000, help="Training timesteps")
     parser.add_argument("--eval-episodes", type=int, default=100, help="Evaluation episodes per seed")
     parser.add_argument("--base-seed", type=int, default=42)
+    parser.add_argument("--seed-offset", type=int, default=0,
+                        help="Skip this many seeds before the first one. Use to shard "
+                             "a multi-seed sweep across parallel processes (each shard "
+                             "writes its own --output; merge with --merge-inputs).")
+    parser.add_argument("--temp-root", type=str, default="stat_temp",
+                        help="Scratch root for per-seed training dirs. Give each parallel "
+                             "process a distinct root so cleanup cannot race.")
     parser.add_argument("--algorithms", nargs="+", default=["hmarl", "random"],
                         help="Algorithms to test")
     parser.add_argument("--output", type=str, default="evaluation_results/stat_test_results.json")
@@ -419,7 +519,14 @@ def main():
                              "(seeds vary the environment rollouts, not training)")
     parser.add_argument("--model-path", type=str, default="checkpoints/hmarl_model.pt",
                         help="Checkpoint for --eval-only (hmarl)")
+    parser.add_argument("--merge-inputs", nargs="+", default=None,
+                        help="Merge shard JSONs written by parallel --seed-offset runs, "
+                             "run the statistical tests over the pooled seeds, and exit.")
     args = parser.parse_args()
+
+    if args.merge_inputs:
+        merge_shards(args.merge_inputs, args.output)
+        return
 
     if args.quick:
         args.timesteps = 100_000
@@ -450,7 +557,8 @@ def main():
 
         seed_prog = ProgressTracker(args.seeds, f"Seeds ({alg.upper()})")
         for s in range(args.seeds):
-            seed = args.base_seed + s
+            seed = args.base_seed + args.seed_offset + s
+            seed_tmp = os.path.join(args.temp_root, f"{alg}_{seed}")
             seed_prog.update(extra=f"seed={seed}")
 
             try:
@@ -462,7 +570,7 @@ def main():
                         metrics = evaluate_hmarl_from_checkpoint(
                             args.model_path, args.eval_episodes, seed + 1000)
                     else:
-                        ckpt = train_hmarl(args.timesteps, seed, f"stat_temp/{alg}_{s}")
+                        ckpt = train_hmarl(args.timesteps, seed, seed_tmp)
                         metrics = evaluate_hmarl_from_checkpoint(ckpt, args.eval_episodes, seed + 1000)
                 elif alg == "random":
                     metrics = evaluate_random(args.eval_episodes, seed)
@@ -470,7 +578,7 @@ def main():
                     print(f"    WARNING: --eval-only not supported for {alg} (no checkpoint); skipping")
                     continue
                 else:
-                    ckpt = train_flat(alg, args.timesteps, seed, f"stat_temp/{alg}_{s}")
+                    ckpt = train_flat(alg, args.timesteps, seed, os.path.join(args.temp_root, f"{alg}_{seed}"))
                     metrics = evaluate_flat(alg, args.eval_episodes, seed + 1000, model_path=ckpt)
 
                 seed_win_rates.append(metrics.get('win_rate', 0))
@@ -582,7 +690,7 @@ def main():
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {args.output}")
 
-    cleanup_temp_dirs()
+    cleanup_own_temp(args.temp_root)
 
 
 if __name__ == "__main__":

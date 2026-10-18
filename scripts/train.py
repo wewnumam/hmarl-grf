@@ -358,7 +358,14 @@ class HMARLTrainer:
         return _extract_obs_util(game_state, player_idx, OBS_DIM)
 
     def _get_subgoal_embed(self, sub_goal: int) -> np.ndarray:
-        """Get sub-goal embedding vector."""
+        """Get sub-goal embedding vector.
+
+        flat_policy (ablation arm) returns a zero vector, so the trained policy
+        sees no sub-goal conditioning — the hierarchical structure is removed
+        while everything else (network, PPO settings, reward) stays identical.
+        """
+        if getattr(self, "flat_policy", False):
+            return np.zeros(SUBGOAL_EMBED_DIM, dtype=np.float32)
         with torch.no_grad():
             sg_tensor = torch.LongTensor([sub_goal]).to(DEVICE)
             embed = self.subgoal_embedding(sg_tensor)
@@ -402,9 +409,15 @@ class HMARLTrainer:
             sub_goals = self.controller.get_sub_goals(game_state, macro_strategy)
 
             # ---- Expert ideal actions (for RCI) ----
-            ideal_actions = self.expert.get_ideal_actions(
-                game_state, sub_goals, macro_strategy,
-            )
+            # random_expert (ablation arm): replace the rule-based oracle with
+            # uniform-random ideal actions, so RCI no longer encodes the
+            # hand-designed tactic prior.
+            if getattr(self, "random_expert", False):
+                ideal_actions = [np.random.randint(0, 18) for _ in range(self.num_agents)]
+            else:
+                ideal_actions = self.expert.get_ideal_actions(
+                    game_state, sub_goals, macro_strategy,
+                )
 
             # ---- Tahap 3: Low-Level Policy (PPO) per agent ----
             joint_actions = []
@@ -507,7 +520,8 @@ class HMARLTrainer:
 
             # ---- Tahap 4: Compute combined reward ----
             self.pass_tracker.update(new_game_state, prev_game_state)
-            total_reward, reward_breakdown = compute_hierarchical_reward(
+            _reward_fn = getattr(self, "reward_fn", None) or compute_hierarchical_reward
+            total_reward, reward_breakdown = _reward_fn(
                 game_reward=team_reward,
                 game_state=new_game_state,
                 actual_actions=joint_actions,
