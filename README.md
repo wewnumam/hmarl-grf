@@ -2,7 +2,41 @@
 
 Hierarchical Multi-Agent Reinforcement Learning for Google Research Football.
 
-Implements a three-level hierarchical RL architecture (High-Level → Mid-Level → Low-Level PPO) with novel Role Coherence Index (RCI) metric, plus three flat baselines (IPPO, SHPPO, MAPPO) for comparison.
+Implements a **partially hierarchical** RL architecture — High- and Mid-Level policies are **rule-based**, only the **Low-Level policy is trained** (PPO) — with the novel Role Coherence Index (RCI) metric, plus flat baselines (IPPO, MAPPO, random) for controlled comparison. See [Current Status](#current-status--remaining-work-2026-10-18) for what is measured and what remains.
+
+## Current Status & Remaining Work (2026-10-18)
+
+### What is established
+
+| Item | Result | Source |
+|------|--------|--------|
+| Training pipeline | Runs end-to-end, uniform JSON logs, incremental flush | `run_logging.py`, `stat_test.py` |
+| Reward shaping converges | Episode reward rises (slope ≈ +0.44/ep over 100 ep); no mode collapse in training | `dumps_obs100/` |
+| Observation fix (obs-blind → obs165) | Opponents now in observation; dense potential-based progression reward | Issue 7 below |
+| Controlled baseline battery | 4 algorithms × 100k steps × 1 seed × 5 eval episodes | `evaluation_results_baseline/stat_test_results.json` |
+| RCI sensitivity | Very stable to threshold variation (Δ ≤ 0.0004) | `evaluation_results_baseline/rci_validity.json` |
+
+### What the data currently shows (honest reading)
+
+- **Win rate is 0 for every policy** (HMARL, IPPO, MAPPO, random) at 100k steps. No policy scores. Differences appear only in *goal difference* (conceding rate) and coordination metrics.
+- **HMARL has the best goal difference** (−36 vs MAPPO −40, random −43, IPPO −60) — but this reflects conceding less, not attacking.
+- **HMARL has the LOWEST categorical RCI** (0.278 vs random 0.465, IPPO 0.876, MAPPO 0.972). RCI does **not** track competitive quality monotonically at this budget.
+- **The earlier "HMARL RCI > random, p = 0.018" discrimination claim is invalid.** The old `evaluate_random` never computed `rci_cat`, so the random baseline was written as `[0,0,0]` — an artefact of metric coverage, not a result. Recomputing uniformly reverses the ordering.
+- **Construct validity did not replicate**: the old RCI↔FAI `r = 0.929` (n=6) becomes `r = −0.780` (n=4) in the controlled run, all `p ≥ 0.203`.
+
+### Remaining work to answer the research questions
+
+| # | Research question | Status | What is still needed |
+|---|-------------------|--------|----------------------|
+| 1 | Does the hierarchical mechanism contribute? (ablation) | **Half** | Ablation runs, but `win_rate = 0` in all 7 configs, so arms are indistinguishable by winning. Need either (a) a training budget where WR becomes non-zero, or (b) reframe the claim around `avg_reward` / `goal_difference` only. Shaping currently *hurts* (best arm is `no_fai`). |
+| 2 | Is RCI a valid metric? (construct / discrimination / consistency) | **No** | Construct validity did not replicate; discrimination invalidated (artefact above); internal consistency not evaluable at 1 seed (old 3-seed CV = 34.2% > 15% threshold). Needs ≥5 seeds per algorithm and a budget where policies actually differ in behaviour. |
+| 3 | How does HMARL compare to IPPO/MAPPO? | **Run + written** | Done at 100k/1 seed. For a publishable claim, needs multi-seed + larger budget; SHPPO excluded (see below). |
+
+### Blockers
+
+- **No policy scores at the tested budget.** Parity with GRF bot difficulty 1.0 needs ≈ 25M steps ([arXiv 1907.11180](https://arxiv.org/abs/1907.11180)); the budget used is 1.65M = 6.6% of that. Competitive claims are out of reach here — the defensible claims are *relative* (vs baselines) and *mechanistic* (convergence, shaping behaviour).
+- **SHPPO is infeasible on this hardware.** `HyperNetwork.weight_head = Linear(256, 256×128 = 32768)` ≈ 8.4M MAC/agent/step × 11 agents → 0.67 steps/s CPU, 0.92 GPU → ≈ 41 h per 100k steps. Reported as an architectural analysis, not run.
+- **Single seed only.** `stat_test.py` skips significance testing with one seed. Every comparative number above is a trend, not a conclusion.
 
 ## Project Structure
 
@@ -31,6 +65,8 @@ hmarl-grf/
 │   ├── stat_test.py              # Multi-seed statistical significance testing
 │   ├── validate_rci.py              # RCI validity evaluation (construct, discrimination, consistency)
 │   ├── ablation.py               # Ablation study (component contributions)
+│   ├── baseline_battery.sh       # Controlled 4-algo battery (HMARL/IPPO/MAPPO/random), CPU-only
+│   ├── rci_battery.sh            # RCI validity battery (validate_rci.py wrapper)
 │   └── train_academy.py          # Simplified PPO for academy scenarios (no HMARL)
 ├── evaluation/
 │   ├── baselines/                # Stable Baselines3 baselines
@@ -95,8 +131,9 @@ flowchart LR
     %% === BASELINES ===
     subgraph BASE["Baselines"]
         direction TB
-        D1["IPPO"] & D2["SHPPO"] & D3["MAPPO"] --> D4["GRF 11v11"]
+        D1["IPPO"] & D3["MAPPO"] & D6["random"] --> D4["GRF 11v11"]
         D4 --> D5["Flat Policies"]
+        D2["SHPPO"] -.->|excluded: 41h/100k| D5
     end
 
     %% === STAT & ABLATION ===
@@ -139,7 +176,9 @@ Scripts categorized by whether they're required for thesis results. **Run Tier 1
 | **0** | `dry_run.py --full` | Smoke test: syntax, imports, GRF env, PPO backward | — | 5 min, do once before any training |
 | **0** | `diagnose_expert.py` | Expert behavioral diagnostic: action dist, pass rate, shots, heatmap | Understand WHY expert is not competitive | 5 min, run before fixing expert |
 | **1** | `train.py` | Train HMARL (3M timesteps → checkpoint) | Foundation for all eval | No — produces `hmarl_model.pt` |
-| **1** | `hmarl.ippo` / `hmarl.shppo` / `hmarl.mappo` | Train flat baselines | Need trained baselines for comparison | No — produces `*_model.pt` |
+| **1** | `scripts/baseline_battery.sh` | Controlled battery: HMARL + IPPO + MAPPO + random, identical budget | Needs trained baselines for comparison | No — ≈2.3 h for 4 algos × 100k |
+| **1** | `hmarl.ippo` / `hmarl.mappo` | Train flat baselines | Need trained baselines for comparison | No — produces `*_model.pt` |
+| **1** | `hmarl.shppo` | SHPPO baseline | **Infeasible on this hardware** (0.67 steps/s → 41 h/100k) | **Yes** — report as architectural analysis |
 | **2** | `eval.py` | Full metrics + 16 plot types | All coordination + performance results | No |
 | **2** | `ablation.py` | Component ablation (7 configs) | Rumusan 1: proving each component matters | No — `--quick` for first pass |
 | **2** | `stat_test.py` | Multi-seed Mann-Whitney U | Statistical rigor for comparative claims | No — `--quick` for first pass |
@@ -157,29 +196,24 @@ python scripts/dry_run.py --full
 # 1b. Diagnose expert policy (understand why it loses)
 python scripts/diagnose_expert.py --episodes 5
 
-# 2. Train (HMARL + baselines) — several days on GTX 1650
-python scripts/train.py --timesteps 3000000
-python -m hmarl.ippo --timesteps 3000000 --seed 42
-python -m hmarl.shppo --timesteps 3000000 --seed 42
-python -m hmarl.mappo --timesteps 3000000 --seed 42
+# 2. Controlled baseline battery (HMARL + IPPO + MAPPO + random), CPU-only
+#    100k steps × 4 algos × 1 seed × 5 eval episodes ≈ 2.3 h on WSL2 CPU
+bash scripts/baseline_battery.sh
 
 # 3. Full evaluation (metrics + plots)
 python scripts/eval.py --checkpoint checkpoints/hmarl_model.pt
 
 # 4. Ablation (quick first, then full)
 python scripts/ablation.py --quick
-python scripts/ablation.py --timesteps 300000 --eval-episodes 50
 
-# 5. Statistical testing (quick first, then full)
-python scripts/stat_test.py --quick
-python scripts/stat_test.py --seeds 5 --timesteps 3000000 --eval-episodes 100
+# 5. Statistical testing (needs ≥2 seeds; currently 1 → test is skipped)
+python scripts/stat_test.py --seeds 5 --timesteps 300000 --eval-episodes 100
 
 # 6. RCI validity
-python scripts/validate_rci.py --quick
-python scripts/validate_rci.py --seeds 3 --timesteps 3000000 --eval-episodes 100
+python scripts/validate_rci.py --seeds 3 --timesteps 300000 --eval-episodes 100
 ```
 
-**Estimated compute time (GTX 1650, WSL):** 3–5 days per 3M-step training run. Ablation (7 configs × 300k) ≈ 1–2 days. Stat test (5 seeds × 4 algos × 3M) ≈ 2–3 weeks if sequential; overlap training to reduce wall time.
+**Measured throughput (WSL2 CPU, 2026-10):** IPPO ≈ 28, MAPPO ≈ 33, HMARL ≈ 31 env-steps/s → 100k ≈ 50–60 min per algorithm. **GPU is slower for this MLP (4.6 vs 27.9 steps/s)** — run on CPU. SHPPO is the exception (0.67 CPU / 0.92 GPU) but still infeasible. Evaluation ≈ 60–68 s/episode.
 
 ### Script → Module Dependency Matrix
 
@@ -544,18 +578,18 @@ Note: If `tensorboard` is not installed on the host, use the container method. T
 ### Baselines
 
 ```bash
-# IPPO (per-agent independent PPO)
-python -m hmarl.ippo --timesteps 3000000 --seed 42
+# Controlled battery: HMARL + IPPO + MAPPO + random, identical budget, CPU-only
+bash scripts/baseline_battery.sh
 
-# SHPPO (shared network, pooled experience)
+# Individual runs
+python -m hmarl.ippo --timesteps 100000 --seed 42
+python -m hmarl.mappo --timesteps 100000 --seed 42
+
+# SHPPO — DO NOT run to completion on this hardware (0.67 steps/s → 41 h/100k)
 python -m hmarl.shppo --timesteps 3000000 --seed 42
-
-# MAPPO (decentralized actors + centralized critic)
-python -m hmarl.mappo --timesteps 3000000 --seed 42
 
 # Resume from checkpoint
 python -m hmarl.ippo --resume dumps/ippo_model.pt
-python -m hmarl.shppo --resume dumps/shppo_model.pt
 python -m hmarl.mappo --resume dumps/mappo_model.pt
 ```
 
@@ -790,7 +824,7 @@ python scripts/stat_test.py --seeds 5 --base-seed 100
 Evaluates Role Coherence Index (RCI) through three validity approaches matching the thesis methodology (BAB IV §Validitas Metrik RCI):
 
 1. **Construct Validity** — Pearson correlation between RCI and established metrics (FAI, Entropy, Compactness, PSR, PPR) with p-values
-2. **Discrimination Validity** — One-sided t-test: HMARL RCI > IPPO RCI > Random RCI (α = 0.05)
+2. **Discrimination Validity** — One-sided t-test: HMARL RCI > IPPO RCI > Random RCI (α = 0.05) — **currently FAILS, see results below**
 3. **Internal Consistency** — Coefficient of Variation (CV) across seeds; CV < 15% = acceptable
 4. **Sensitivity Analysis** (optional) — RCI stability under expert policy threshold variations (±20% on d_tackle, d_safe, d_shoot)
 
@@ -812,6 +846,12 @@ python scripts/validate_rci.py --algorithms hmarl ippo shppo random
 ```
 
 **Output:** `evaluation_results/rci_validity.json`
+
+**Actual results so far (2026-10-18):** none of the three validity criteria is met at the tested budget.
+- **Discrimination:** FAIL. The previous "PASS" (HMARL 0.388 vs random 0.000, t=5.06, p=0.018) was an artefact — the old `evaluate_random` never computed `rci_cat`, so the random baseline was written as `[0,0,0]`. Recomputing uniformly (`evaluation_results_baseline/`) gives HMARL 0.278 < random 0.465 < IPPO 0.876 < MAPPO 0.972 — the ordering reverses.
+- **Construct:** not replicated. RCI_cat↔FAI `r=0.929` (n=6, old) → `r=−0.780` (n=4, controlled), all `p ≥ 0.203`. Sign of RCI↔entropy/compactness also wrong in both runs.
+- **Internal consistency:** not evaluable at 1 seed. Old 3-seed CV = 34.2% > 15% threshold.
+- **Sensitivity:** very stable — Δ ≤ 0.0004 under ±20% threshold variation.
 
 **Error handling:** Full tracebacks on failure (not just error messages). Imports consolidated to `hmarl.utils` (no more cross-script circular imports). Format string safety for missing metrics. Handles skipped tests (e.g., insufficient seeds) without KeyError.
 
