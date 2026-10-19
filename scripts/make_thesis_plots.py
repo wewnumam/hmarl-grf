@@ -35,8 +35,8 @@ plt.rcParams.update({
     "savefig.bbox": "tight",
 })
 
-GREY = ["0.15", "0.40", "0.62", "0.82"]
 ALGOS = [("hmarl", "HMARL"), ("ippo", "IPPO"), ("mappo", "MAPPO"), ("random", "Random")]
+MARKERS = {"hmarl": "o", "ippo": "s", "mappo": "^", "random": "D"}
 PRETTY = {
     "random_expert": "Expert acak",
     "full_hmarl": "Full HMARL",
@@ -49,22 +49,23 @@ PRETTY = {
 }
 
 
-def box_strip(ax, series, labels, ylabel, title):
-    bp = ax.boxplot(series, widths=0.5, patch_artist=True, showfliers=False,
-                    medianprops=dict(color="black", lw=1.0),
-                    whiskerprops=dict(color="0.35", lw=0.6),
-                    capprops=dict(color="0.35", lw=0.6),
-                    boxprops=dict(lw=0.6))
-    for patch, g in zip(bp["boxes"], GREY):
-        patch.set_facecolor(g)
-        patch.set_alpha(0.55)
-        patch.set_edgecolor("black")
+def dot_plot(ax, series, labels, ylabel, title):
+    """Per-seed dot plot: 4 open circles + median bar + min-max range line.
+
+    A boxplot is unusable at n=4: Q1/Q3 are interpolated, so the min and max
+    land far outside the box and read as stray outliers.
+    """
     for i, vals in enumerate(series, start=1):
-        ax.scatter([i + (j - (len(vals) - 1) / 2.0) * 0.06 for j in range(len(vals))],
-                   vals, s=7, facecolors="none", edgecolors="black",
-                   linewidths=0.6, zorder=3)
+        sv = sorted(vals)
+        med = st.median(vals)
+        ax.plot([i, i], [sv[0], sv[-1]], color="0.55", lw=0.8, zorder=1)
+        ax.plot([i - 0.19, i + 0.19], [med, med], color="black", lw=1.5, zorder=3)
+        xs = [i + (j - 1.5) * 0.075 for j in range(len(vals))]
+        ax.scatter(xs, vals, s=13, facecolors="none", edgecolors="black",
+                   linewidths=0.7, zorder=4)
     ax.set_xticks(range(1, len(labels) + 1))
     ax.set_xticklabels(labels)
+    ax.set_xlim(0.45, len(labels) + 0.55)
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=8, pad=6)
     ax.grid(axis="y", ls=":", lw=0.4, color="0.75")
@@ -74,19 +75,18 @@ def box_strip(ax, series, labels, ylabel, title):
 def main():
     base = json.load(open(os.path.join(BASE, "stat_test_results.json")))["results"]
     abl = json.load(open(os.path.join(ABL, "ablation_results.json")))["results"]
-    val = json.load(open(os.path.join(BASE, "rci_validity.json")))
+    val = json.load(open(os.path.join(BASE, "rci_validity.json")))  # noqa: F841
 
     os.makedirs(OUT, exist_ok=True)
 
     # --- Figure 1: baseline distributions -----------------------------------
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.9))
-    box_strip(axes[0], [base[a]["goal_differences"] for a, _ in ALGOS],
-              [n for _, n in ALGOS], "Goal difference",
-              "(a) Goal difference per seed (n=4)")
-    box_strip(axes[1], [base[a]["rci"] for a, _ in ALGOS],
-              [n for _, n in ALGOS], r"RCI$_{cat}$",
-              r"(b) RCI$_{cat}$ per seed (n=4)")
-    axes[1].axhline(0.0, color="0.6", lw=0.5, ls="--")
+    dot_plot(axes[0], [base[a]["goal_differences"] for a, _ in ALGOS],
+             [n for _, n in ALGOS], "Goal difference",
+             "(a) Goal difference per seed (n=4)")
+    dot_plot(axes[1], [base[a]["rci"] for a, _ in ALGOS],
+             [n for _, n in ALGOS], r"RCI$_{cat}$",
+             r"(b) RCI$_{cat}$ per seed (n=4)")
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "fig_baseline_dist.png"))
     plt.close(fig)
@@ -94,7 +94,7 @@ def main():
     # --- Figure 2: ablation bar ---------------------------------------------
     rows = []
     for name, a in abl.items():
-        rows.append((name, st.mean(a["game_rewards"]), st.pstdev(a["game_rewards"]),
+        rows.append((name, st.mean(a["game_rewards"]), st.stdev(a["game_rewards"]),
                      st.mean(a["goal_differences"])))
     rows.sort(key=lambda r: r[1])
     labels = [PRETTY.get(r[0], r[0].replace("_", " ")) for r in rows]
@@ -103,45 +103,53 @@ def main():
 
     fig, ax = plt.subplots(figsize=(6.2, 3.2))
     y = range(len(rows))
-    ax.barh(list(y), means, xerr=errs, height=0.62, color="0.55",
-            edgecolor="black", linewidth=0.6, alpha=0.75,
-            error_kw=dict(ecolor="black", lw=0.7, capsize=2.5))
+    ax.barh(list(y), means, height=0.62, color="0.85",
+            edgecolor="black", linewidth=0.6, zorder=2)
     for i, (m, e) in enumerate(zip(means, errs)):
-        ax.annotate("%.1f" % m, (m - e, i), xytext=(-3, 0),
+        ax.errorbar([m], [i], xerr=[e], fmt="none", ecolor="black", elinewidth=1.0,
+                    capsize=3.5, capthick=1.0, zorder=4)
+        ax.annotate("%.1f" % m, (m - e, i), xytext=(-4, 0),
                     textcoords="offset points", va="center", ha="right",
                     fontsize=6.5)
-    ax.set_xlim(min(m - e for m, e in zip(means, errs)) - 18,
-                max(m + e for m, e in zip(means, errs)) + 8)
+    lo = min(m - e for m, e in zip(means, errs))
+    hi = max(m + e for m, e in zip(means, errs))
+    ax.set_xlim(min(lo - 18, -200), max(0.0, hi) + 10)
     ax.set_yticks(list(y))
     ax.set_yticklabels(labels, fontsize=7)
+    ax.set_ylim(-0.6, len(rows) - 0.4)
     ax.set_xlabel("Game reward per episode (mean $\\pm$ std, n=4)")
     ax.grid(axis="x", ls=":", lw=0.4, color="0.75")
     ax.set_axisbelow(True)
-    ax.axvline(0, color="black", lw=0.6)
+    ax.axvline(0, color="black", lw=0.7, zorder=4)
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "fig_ablation_bar.png"))
     plt.close(fig)
 
     # --- Figure 3: validity scatter -----------------------------------------
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.9))
+    fig, axes = plt.subplots(1, 2, figsize=(7.4, 2.9))
 
-    pairs = val.get("construct") or val.get("correlations") or []
     rci, fai = [], []
-    for a, _ in ALGOS:
-        for r_, f_ in zip(base[a]["rci"], base[a]["fai_mean"]):
-            rci.append(r_)
-            fai.append(f_)
-    axes[0].scatter(rci, fai, s=16, facecolors="none", edgecolors="black", linewidths=0.7)
+    for a, label in ALGOS:
+        xa = base[a]["rci"]
+        ya = base[a]["fai_mean"]
+        rci += list(xa)
+        fai += list(ya)
+        axes[0].scatter(xa, ya, s=17, facecolors="none", edgecolors="black",
+                        linewidths=0.7, marker=MARKERS[a], label=label, zorder=3)
     axes[0].set_xlabel(r"RCI$_{cat}$")
     axes[0].set_ylabel("FAI")
     r_pooled = _pearson(rci, fai)
-    axes[0].set_title("(a) RCI$_{cat}$ vs FAI, pooled (n=16), r=%.3f" % r_pooled, fontsize=8, pad=6)
+    axes[0].set_title("(a) RCI$_{cat}$ vs FAI, pooled (n=16), r=%.3f" % r_pooled,
+                      fontsize=8, pad=6)
+    axes[0].legend(fontsize=6, loc="lower left", framealpha=0.9, handletextpad=0.3,
+                   borderpad=0.3, labelspacing=0.25)
     axes[0].grid(ls=":", lw=0.4, color="0.75")
     axes[0].set_axisbelow(True)
 
-    xr = [st.mean(a["rci"]) for _, a in sorted(abl.items(), key=lambda kv: kv[1]["rci"] and st.mean(kv[1]["rci"]))]
-    yr = [st.mean(a["goal_differences"]) for _, a in sorted(abl.items(), key=lambda kv: st.mean(kv[1]["rci"]))]
-    nr = [n for n, _ in sorted(abl.items(), key=lambda kv: st.mean(kv[1]["rci"]))]
+    order = sorted(abl.items(), key=lambda kv: st.mean(kv[1]["rci"]))
+    xr = [st.mean(a["rci"]) for _, a in order]
+    yr = [st.mean(a["goal_differences"]) for _, a in order]
+    nr = [n for n, _ in order]
     axes[1].scatter(xr, yr, s=18, facecolors="none", edgecolors="black", linewidths=0.7)
     for k, (xn, yn) in enumerate(zip(xr, yr), start=1):
         axes[1].annotate(str(k), (xn, yn), fontsize=5.5, fontweight="bold",
@@ -150,7 +158,7 @@ def main():
                          bbox=dict(boxstyle="circle,pad=0.18", fc="0.25", ec="none"))
     legend = "\n".join("%d = %s" % (k, PRETTY.get(n, n.replace("_", " ")))
                        for k, n in enumerate(nr, start=1))
-    axes[1].text(1.02, 0.5, legend, transform=axes[1].transAxes, fontsize=5.4,
+    axes[1].text(1.03, 0.5, legend, transform=axes[1].transAxes, fontsize=5.4,
                  va="center", ha="left", linespacing=1.5)
     axes[1].set_xlabel(r"RCI$_{cat}$ (arm mean)")
     axes[1].set_ylabel("Goal difference (arm mean)")
