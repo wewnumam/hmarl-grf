@@ -230,3 +230,14 @@ ppo_11v11_model.zip
 valid_temp
 dumps/training_log.json
 dumps/hmarl_runs
+
+# Local scratch / diagnostics (not part of the study)
+_*/
+_*.py
+_*.out
+_*.log
+dumps_*/
+dumps_*_run.log
+scratch/
+eval_pn_fix/
+evaluation_results_obs100/
