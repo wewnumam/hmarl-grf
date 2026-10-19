@@ -1,0 +1,276 @@
+{
+  "meta": {
+    "script": "scripts/ablation.py",
+    "timestamp_utc": "2026-10-19T03:12:32.933732Z",
+    "device": {
+      "torch_device": "cpu",
+      "cuda_available": false,
+      "cuda_version": "10.2",
+      "gpu": null,
+      "cpu_count": 16,
+      "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-Ubuntu-18.04-bionic"
+    },
+    "versions": {
+      "python": "3.6.9",
+      "numpy": "1.18.1",
+      "torch": "1.10.2+cu102",
+      "stable_baselines3": "1.3.0",
+      "gym": "0.19.0"
+    },
+    "train_time_s": 17831.49,
+    "configs_run": [
+      "full_hmarl",
+      "no_fai",
+      "no_ppr",
+      "no_rci",
+      "no_reward_shaping",
+      "no_gk_penalty",
+      "flat_policy",
+      "random_expert"
+    ]
+  },
+  "config": {
+    "timesteps": 50000,
+    "eval_episodes": 10,
+    "base_seed": 43,
+    "seed_offset": 0,
+    "seeds": 1,
+    "note": "seeds = independent training runs (pooled from shards)"
+  },
+  "results": {
+    "full_hmarl": {
+      "description": "Full HMARL (baseline)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -914.9973448829181
+      ],
+      "game_rewards": [
+        -18.7
+      ],
+      "goal_differences": [
+        -17
+      ],
+      "rci": [
+        0.3112969696969696
+      ],
+      "fai": [
+        0.7554836166569313
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/full_hmarl/checkpoints/hmarl_model.pt"
+      ]
+    },
+    "no_fai": {
+      "description": "Without FAI reward (\u03b1_H = 0)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -4970.533844862158
+      ],
+      "game_rewards": [
+        -96.8
+      ],
+      "goal_differences": [
+        -88
+      ],
+      "rci": [
+        0.6224636363636364
+      ],
+      "fai": [
+        0.7681227769935971
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/no_fai/checkpoints/hmarl_model.pt"
+      ]
+    },
+    "no_ppr": {
+      "description": "Without PPR reward (\u03b1_M = 0)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -5042.84846108598
+      ],
+      "game_rewards": [
+        -95.7
+      ],
+      "goal_differences": [
+        -87
+      ],
+      "rci": [
+        0.8392151515151517
+      ],
+      "fai": [
+        0.7552420089047612
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/no_ppr/checkpoints/hmarl_model.pt"
+      ]
+    },
+    "no_rci": {
+      "description": "Without RCI reward (\u03b1_L = 0)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -4968.651875401131
+      ],
+      "game_rewards": [
+        -94.6
+      ],
+      "goal_differences": [
+        -86
+      ],
+      "rci": [
+        0.394169696969697
+      ],
+      "fai": [
+        0.7862875953490418
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/no_rci/checkpoints/hmarl_model.pt"
+      ]
+    },
+    "no_reward_shaping": {
+      "description": "No reward shaping (game reward only)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -5427.898557469642
+      ],
+      "game_rewards": [
+        -104.5
+      ],
+      "goal_differences": [
+        -95
+      ],
+      "rci": [
+        0.3440878787878788
+      ],
+      "fai": [
+        0.7782554426357916
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/no_reward_shaping/checkpoints/hmarl_model.pt"
+      ]
+    },
+    "no_gk_penalty": {
+      "description": "Without GK positional penalty (\u03b1_GK = 0)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -6296.96254297809
+      ],
+      "game_rewards": [
+        -122.1
+      ],
+      "goal_differences": [
+        -111
+      ],
+      "rci": [
+        0.5861848484848484
+      ],
+      "fai": [
+        0.815307290929608
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/no_gk_penalty/checkpoints/hmarl_model.pt"
+      ]
+    },
+    "flat_policy": {
+      "description": "Flat policy (no sub-goal conditioning)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -7783.469071418525
+      ],
+      "game_rewards": [
+        -150.7
+      ],
+      "goal_differences": [
+        -137
+      ],
+      "rci": [
+        0.7128303030303029
+      ],
+      "fai": [
+        0.7606798148875811
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/flat_policy/checkpoints/hmarl_model.pt"
+      ]
+    },
+    "random_expert": {
+      "description": "Random expert (random ideal actions)",
+      "wins": [
+        0.0
+      ],
+      "rewards": [
+        -3171.987294109085
+      ],
+      "game_rewards": [
+        -61.6
+      ],
+      "goal_differences": [
+        -56
+      ],
+      "rci": [
+        0.14056060606060608
+      ],
+      "fai": [
+        0.8063179457743275
+      ],
+      "checkpoints": [
+        "ablation_temp_seed43/random_expert/checkpoints/hmarl_model.pt"
+      ]
+    }
+  },
+  "summary": {
+    "full_hmarl": {
+      "win_rate": 0.0,
+      "avg_reward": -914.9973448829181,
+      "goal_difference": -17
+    },
+    "no_fai": {
+      "win_rate": 0.0,
+      "avg_reward": -4970.533844862158,
+      "goal_difference": -88
+    },
+    "no_ppr": {
+      "win_rate": 0.0,
+      "avg_reward": -5042.84846108598,
+      "goal_difference": -87
+    },
+    "no_rci": {
+      "win_rate": 0.0,
+      "avg_reward": -4968.651875401131,
+      "goal_difference": -86
+    },
+    "no_reward_shaping": {
+      "win_rate": 0.0,
+      "avg_reward": -5427.898557469642,
+      "goal_difference": -95
+    },
+    "no_gk_penalty": {
+      "win_rate": 0.0,
+      "avg_reward": -6296.96254297809,
+      "goal_difference": -111
+    },
+    "flat_policy": {
+      "win_rate": 0.0,
+      "avg_reward": -7783.469071418525,
+      "goal_difference": -137
+    },
+    "random_expert": {
+      "win_rate": 0.0,
+      "avg_reward": -3171.987294109085,
+      "goal_difference": -56
+    }
+  }
+}

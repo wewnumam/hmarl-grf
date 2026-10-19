@@ -1,0 +1,120 @@
+Ablation Study | Configs: 8 | Steps: 50,000 | Eval: 10 episodes
+============================================================
+
+--- full_hmarl: Full HMARL (baseline) ---
+Ablation: FAI=True | PPR=True | RCI=True
+Action mask: True
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/full_hmarl
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/full_hmarl/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/full_hmarl/training_log.json
+
+Training complete. Total time: 1502.5s
+  Result: WR=0.0% | Reward=-12125.14 | GD=-212 | RCI=0.5906
+  Ablation configs: 1/8 (12%) | 0.0/s | ETA: 1h56m | full_hmarl   
+--- no_fai: Without FAI reward (α_H = 0) ---
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/no_fai
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/no_fai/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/no_fai/training_log.json
+
+Training complete. Total time: 1451.5s
+  Result: WR=0.0% | Reward=-2676.56 | GD=-48 | RCI=0.1930
+  Ablation configs: 2/8 (25%) | 0.0/s | ETA: 1h40m | no_fai   
+--- no_ppr: Without PPR reward (α_M = 0) ---
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/no_ppr
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/no_ppr/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/no_ppr/training_log.json
+
+Training complete. Total time: 1662.6s
+  Result: WR=0.0% | Reward=-6039.12 | GD=-106 | RCI=0.5763
+  Ablation configs: 3/8 (38%) | 0.0/s | ETA: 1h23m | no_ppr   
+--- no_rci: Without RCI reward (α_L = 0) ---
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/no_rci
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/no_rci/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/no_rci/training_log.json
+
+Training complete. Total time: 1595.4s
+  Result: WR=0.0% | Reward=-13836.81 | GD=-241 | RCI=0.7455
+  Ablation configs: 4/8 (50%) | 0.0/s | ETA: 1h06m | no_rci   
+--- no_reward_shaping: No reward shaping (game reward only) ---
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/no_reward_shaping
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/no_reward_shaping/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/no_reward_shaping/training_log.json
+
+Training complete. Total time: 1581.1s
+  Result: WR=0.0% | Reward=-4537.24 | GD=-80 | RCI=0.1471
+  Ablation configs: 5/8 (62%) | 0.0/s | ETA: 50m00s | no_reward_shaping   
+--- no_gk_penalty: Without GK positional penalty (α_GK = 0) ---
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/no_gk_penalty
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/no_gk_penalty/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/no_gk_penalty/training_log.json
+
+Training complete. Total time: 1626.2s
+  Result: WR=0.0% | Reward=-7404.03 | GD=-130 | RCI=0.2923
+  Ablation configs: 6/8 (75%) | 0.0/s | ETA: 33m20s | no_gk_penalty   
+--- flat_policy: Flat policy (no sub-goal conditioning) ---
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/flat_policy
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/flat_policy/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/flat_policy/training_log.json
+
+Training complete. Total time: 1683.0s
+  Result: WR=0.0% | Reward=-5335.91 | GD=-94 | RCI=0.8094
+  Ablation configs: 7/8 (88%) | 0.0/s | ETA: 16m40s | flat_policy   
+--- random_expert: Random expert (random ideal actions) ---
+HMARL Training | Device: cpu
+Total timesteps: 50,000
+Log dir: ablation_temp_seed45/random_expert
+Dump every 500 episodes (max 10 kept)
+============================================================
+Checkpoint saved: ablation_temp_seed45/random_expert/checkpoints/hmarl_model.pt
+Run log saved to ablation_temp_seed45/random_expert/training_log.json
+
+Training complete. Total time: 1618.5s
+  Result: WR=0.0% | Reward=-8510.09 | GD=-148 | RCI=0.4584
+  Ablation configs: 8/8 (100%) | 0.0/s | ETA: 0s | random_expert     Ablation configs: 8/8 (100%) | elapsed: 4h57m                    
+
+========================================================================
+  ABLATION SUMMARY
+========================================================================
+  Config                      Win Rate   Avg Reward  Goal Diff
+  ---------------------------------------------------------
+  full_hmarl                      0.0%    -12125.14       -212
+  no_fai                          0.0%     -2676.56        -48 (+0.0%)
+  no_ppr                          0.0%     -6039.12       -106 (+0.0%)
+  no_rci                          0.0%    -13836.81       -241 (+0.0%)
+  no_reward_shaping               0.0%     -4537.24        -80 (+0.0%)
+  no_gk_penalty                   0.0%     -7404.03       -130 (+0.0%)
+  flat_policy                     0.0%     -5335.91        -94 (+0.0%)
+  random_expert                   0.0%     -8510.09       -148 (+0.0%)
+========================================================================
+
+Results saved to evaluation_results_ablation/shard_seed45.json
+Total time: 17853s
+  Cleaned up: ablation_temp_seed45/

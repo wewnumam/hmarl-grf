@@ -1,0 +1,212 @@
+{
+  "meta": {
+    "script": "scripts/stat_test.py",
+    "timestamp_utc": "2026-10-18T22:12:40.909660Z",
+    "device": {
+      "torch_device": "cpu",
+      "cuda_available": false,
+      "cuda_version": "10.2",
+      "gpu": null,
+      "cpu_count": 16,
+      "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-Ubuntu-18.04-bionic"
+    },
+    "versions": {
+      "python": "3.6.9",
+      "numpy": "1.18.1",
+      "torch": "1.10.2+cu102",
+      "stable_baselines3": "1.3.0",
+      "gym": "0.19.0"
+    },
+    "train_time_s": 22130.63,
+    "algorithms": [
+      "hmarl",
+      "ippo",
+      "mappo",
+      "random"
+    ]
+  },
+  "config": {
+    "seeds": 1,
+    "timesteps": 100000,
+    "eval_episodes": 10,
+    "base_seed": 44,
+    "eval_only": false,
+    "model_path": null,
+    "note": "seeds = independent training runs"
+  },
+  "results": {
+    "hmarl": {
+      "win_rates": [
+        0.0
+      ],
+      "win_rate_mean": 0.0,
+      "win_rate_std": 0.0,
+      "goal_differences": [
+        -142
+      ],
+      "goal_difference_mean": -142.0,
+      "goal_difference_std": 0.0,
+      "rewards": [
+        -156.2
+      ],
+      "rci": [
+        0.08591212121212122
+      ],
+      "rci_strict": [
+        0.008366666666666666
+      ],
+      "rci_nomove": [
+        0.0020393939393939394
+      ],
+      "fai_mean": [
+        0.7254013013319507
+      ],
+      "positional_entropy": [
+        3.6129846822605014
+      ],
+      "compactness_mean": [
+        21.35392210575618
+      ],
+      "psr": [
+        0.0
+      ],
+      "ppr": [
+        0.0
+      ]
+    },
+    "ippo": {
+      "win_rates": [
+        0.0
+      ],
+      "win_rate_mean": 0.0,
+      "win_rate_std": 0.0,
+      "goal_differences": [
+        -28
+      ],
+      "goal_difference_mean": -28.0,
+      "goal_difference_std": 0.0,
+      "rewards": [
+        -30.8
+      ],
+      "rci": [
+        0.4190303030303031
+      ],
+      "rci_strict": [
+        0.004151515151515152
+      ],
+      "rci_nomove": [
+        0.0003060606060606061
+      ],
+      "fai_mean": [
+        0.7961255571154721
+      ],
+      "positional_entropy": [
+        2.137227375430912
+      ],
+      "compactness_mean": [
+        20.898549013491
+      ],
+      "psr": [
+        0.0
+      ],
+      "ppr": [
+        0.0
+      ]
+    },
+    "mappo": {
+      "win_rates": [
+        0.0
+      ],
+      "win_rate_mean": 0.0,
+      "win_rate_std": 0.0,
+      "goal_differences": [
+        -113
+      ],
+      "goal_difference_mean": -113.0,
+      "goal_difference_std": 0.0,
+      "rewards": [
+        -124.3
+      ],
+      "rci": [
+        0.9848939393939395
+      ],
+      "rci_strict": [
+        0.009769696969696972
+      ],
+      "rci_nomove": [
+        0.0
+      ],
+      "fai_mean": [
+        0.7186097379951075
+      ],
+      "positional_entropy": [
+        2.6189193906677852
+      ],
+      "compactness_mean": [
+        23.839387320750685
+      ],
+      "psr": [
+        0.0
+      ],
+      "ppr": [
+        0.0
+      ]
+    },
+    "random": {
+      "win_rates": [
+        0.0
+      ],
+      "win_rate_mean": 0.0,
+      "win_rate_std": 0.0,
+      "goal_differences": [
+        -82
+      ],
+      "goal_difference_mean": -82.0,
+      "goal_difference_std": 0.0,
+      "rewards": [
+        -90.2
+      ],
+      "rci": [
+        0.46386060606060614
+      ],
+      "rci_strict": [
+        0.05260909090909091
+      ],
+      "rci_nomove": [
+        0.013784848484848485
+      ],
+      "fai_mean": [
+        0.827926613948677
+      ],
+      "positional_entropy": [
+        2.823665166824741
+      ],
+      "compactness_mean": [
+        21.251340516962426
+      ],
+      "psr": [
+        1.8518518518518516
+      ],
+      "ppr": [
+        100.0
+      ]
+    }
+  },
+  "statistical_tests": [
+    {
+      "baseline": "ippo",
+      "n_seeds": 1,
+      "test": "skipped (need >= 2 seeds)"
+    },
+    {
+      "baseline": "mappo",
+      "n_seeds": 1,
+      "test": "skipped (need >= 2 seeds)"
+    },
+    {
+      "baseline": "random",
+      "n_seeds": 1,
+      "test": "skipped (need >= 2 seeds)"
+    }
+  ]
+}

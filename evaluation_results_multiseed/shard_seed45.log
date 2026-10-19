@@ -1,0 +1,77 @@
+
+============================================================
+  Algorithm: HMARL | Seeds: 1 | Timesteps: 100,000
+============================================================
+  Seeds (HMARL): 1/1 (100%) | 100.0/s | ETA: 0s | seed=45   Ablation: FAI=True | PPR=True | RCI=True
+Action mask: True
+HMARL Training | Device: cpu
+Total timesteps: 100,000
+Log dir: stat_temp_seed45/hmarl_45
+Dump every 500 episodes (max 10 kept)
+============================================================
+[ 75.0%] Ep     25 | Step    75000/100,000 | AvgR(100):   -47.53 | RCI: 0.710 | FAI: 0.839 | PPR: 4.000 | Cmp: 22.377 | 30.9 steps/s | ETA 00:13:30
+Checkpoint saved: stat_temp_seed45/hmarl_45/checkpoints/hmarl_model.pt
+Run log saved to stat_temp_seed45/hmarl_45/training_log.json
+  [EVAL] WR: 0.0% | Avg Reward: -111.10 | GD: -101
+Checkpoint saved: stat_temp_seed45/hmarl_45/checkpoints/hmarl_model.pt
+Run log saved to stat_temp_seed45/hmarl_45/training_log.json
+
+Training complete. Total time: 3878.3s
+
+    WR: 0.0% | GD: -93 | RCI: 0.3564121212121212
+  Seeds (HMARL): 1/1 (100%) | elapsed: 1h15m                    
+    [partial results flushed: ['hmarl']]
+
+============================================================
+  Algorithm: IPPO | Seeds: 1 | Timesteps: 100,000
+============================================================
+  Seeds (IPPO): 1/1 (100%) | 100.0/s | ETA: 0s | seed=45   IPPO Training | Device: cpu | Timesteps: 100,000
+Model saved: stat_temp_seed45/ippo_45/ippo_model.pt
+
+IPPO Training complete. (2982.1s)
+  Eval Episodes: 1/10 (10%) | 0.0/s | ETA: 9m34s     Eval Episodes: 2/10 (20%) | 0.0/s | ETA: 8m25s     Eval Episodes: 3/10 (30%) | 0.0/s | ETA: 1h56m     Eval Episodes: 4/10 (40%) | 0.0/s | ETA: 1h40m     Eval Episodes: 5/10 (50%) | 0.0/s | ETA: 1h23m     Eval Episodes: 6/10 (60%) | 0.0/s | ETA: 1h06m     Eval Episodes: 7/10 (70%) | 0.0/s | ETA: 50m00s     Eval Episodes: 8/10 (80%) | 0.0/s | ETA: 33m20s     Eval Episodes: 9/10 (90%) | 0.0/s | ETA: 16m40s     Eval Episodes: 10/10 (100%) | 0.0/s | ETA: 0s     Eval Episodes: 10/10 (100%) | elapsed: 3h44m                    
+
+    WR: 0.0% | GD: -87 | RCI: 0.8329818181818183
+  Seeds (IPPO): 1/1 (100%) | elapsed: 4h34m                    
+    [partial results flushed: ['hmarl', 'ippo']]
+
+============================================================
+  Algorithm: MAPPO | Seeds: 1 | Timesteps: 100,000
+============================================================
+  Seeds (MAPPO): 1/1 (100%) | 100.0/s | ETA: 0s | seed=45   MAPPO Training | Device: cpu | Timesteps: 100,000
+MAPPO training complete. Total steps: 132,000
+  Eval Episodes: 1/10 (10%) | 0.0/s | ETA: 8m07s     Eval Episodes: 2/10 (20%) | 0.0/s | ETA: 7m04s     Eval Episodes: 3/10 (30%) | 0.0/s | ETA: 6m06s     Eval Episodes: 4/10 (40%) | 0.0/s | ETA: 5m12s     Eval Episodes: 5/10 (50%) | 0.0/s | ETA: 4m19s     Eval Episodes: 6/10 (60%) | 0.0/s | ETA: 3m26s     Eval Episodes: 7/10 (70%) | 0.0/s | ETA: 2m35s     Eval Episodes: 8/10 (80%) | 0.0/s | ETA: 1m43s     Eval Episodes: 9/10 (90%) | 0.0/s | ETA: 52s     Eval Episodes: 10/10 (100%) | 0.0/s | ETA: 0s     Eval Episodes: 10/10 (100%) | elapsed: 8m37s                    
+
+    WR: 0.0% | GD: -112 | RCI: 0.9836545454545456
+  Seeds (MAPPO): 1/1 (100%) | elapsed: 13m27s                    
+    [partial results flushed: ['hmarl', 'ippo', 'mappo']]
+
+============================================================
+  Algorithm: RANDOM | Seeds: 1 | Timesteps: 100,000
+============================================================
+  Seeds (RANDOM): 1/1 (100%) | 100.0/s | ETA: 0s | seed=45   
+    WR: 0.0% | GD: -87 | RCI: 0.46249090909090906
+  Seeds (RANDOM): 1/1 (100%) | elapsed: 7m25s                    
+    [partial results flushed: ['hmarl', 'ippo', 'mappo', 'random']]
+
+============================================================
+  STATISTICAL TESTS (HMARL vs baselines, Mann-Whitney U on goal difference)
+============================================================
+
+  HMARL vs ippo:
+    HMARL WR: 0.0% ± 0.0% | GD: -93.0 ± 0.0
+    ippo WR: 0.0% ± 0.0% | GD: -87.0 ± 0.0
+    Test: skipped (need >= 2 seeds)
+
+  HMARL vs mappo:
+    HMARL WR: 0.0% ± 0.0% | GD: -93.0 ± 0.0
+    mappo WR: 0.0% ± 0.0% | GD: -112.0 ± 0.0
+    Test: skipped (need >= 2 seeds)
+
+  HMARL vs random:
+    HMARL WR: 0.0% ± 0.0% | GD: -93.0 ± 0.0
+    random WR: 0.0% ± 0.0% | GD: -87.0 ± 0.0
+    Test: skipped (need >= 2 seeds)
+
+Results saved to evaluation_results_multiseed/shard_seed45.json
+  Cleaned up: stat_temp_seed45/

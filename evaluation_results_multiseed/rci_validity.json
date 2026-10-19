@@ -1,0 +1,260 @@
+{
+  "construct_validity": {
+    "rci_cat\u2194fai_mean": {
+      "pearson_r": -0.5292,
+      "p_value": 0.035046,
+      "significant": "True",
+      "expected_direction": "positive",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected positive significant correlation"
+    },
+    "rci_strict\u2194fai_mean": {
+      "pearson_r": 0.0143,
+      "p_value": 0.958056,
+      "significant": "False",
+      "expected_direction": "positive",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected positive significant correlation"
+    },
+    "rci_cat\u2194positional_entropy": {
+      "pearson_r": -0.3226,
+      "p_value": 0.222921,
+      "significant": "False",
+      "expected_direction": "negative",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected negative significant correlation"
+    },
+    "rci_strict\u2194positional_entropy": {
+      "pearson_r": 0.2618,
+      "p_value": 0.327291,
+      "significant": "False",
+      "expected_direction": "negative",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected negative significant correlation"
+    },
+    "rci_cat\u2194compactness_mean": {
+      "pearson_r": -0.0285,
+      "p_value": 0.916503,
+      "significant": "False",
+      "expected_direction": "negative",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected negative significant correlation"
+    },
+    "rci_strict\u2194compactness_mean": {
+      "pearson_r": -0.4244,
+      "p_value": 0.10133,
+      "significant": "False",
+      "expected_direction": "negative",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected negative significant correlation"
+    },
+    "rci_cat\u2194psr": {
+      "pearson_r": -0.0743,
+      "p_value": 0.784606,
+      "significant": "False",
+      "expected_direction": "positive",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected positive significant correlation"
+    },
+    "rci_cat\u2194ppr": {
+      "pearson_r": -0.2199,
+      "p_value": 0.413242,
+      "significant": "False",
+      "expected_direction": "positive",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected positive significant correlation"
+    },
+    "rci_cat\u2194win_rate": {
+      "pearson_r": NaN,
+      "p_value": NaN,
+      "significant": false,
+      "expected_direction": "positive",
+      "matched": false,
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected positive significant correlation"
+    },
+    "rci_nomove\u2194fai_mean": {
+      "pearson_r": 0.6357,
+      "p_value": 0.008129,
+      "significant": "True",
+      "expected_direction": "positive",
+      "matched": "True",
+      "n": 16,
+      "interpretation": "PASS"
+    },
+    "rci_nomove\u2194positional_entropy": {
+      "pearson_r": 0.214,
+      "p_value": 0.426069,
+      "significant": "False",
+      "expected_direction": "negative",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected negative significant correlation"
+    },
+    "rci_nomove\u2194compactness_mean": {
+      "pearson_r": -0.1858,
+      "p_value": 0.490812,
+      "significant": "False",
+      "expected_direction": "negative",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected negative significant correlation"
+    },
+    "rci_nomove\u2194psr": {
+      "pearson_r": 0.0757,
+      "p_value": 0.78064,
+      "significant": "False",
+      "expected_direction": "positive",
+      "matched": "False",
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected positive significant correlation"
+    },
+    "rci_nomove\u2194win_rate": {
+      "pearson_r": NaN,
+      "p_value": NaN,
+      "significant": false,
+      "expected_direction": "positive",
+      "matched": false,
+      "n": 16,
+      "interpretation": "FAIL \u2014 expected positive significant correlation"
+    }
+  },
+  "discrimination_validity": {
+    "hmarl_vs_ippo": {
+      "baseline": "ippo",
+      "test": "One-sided t-test (HMARL > baseline)",
+      "alpha": 0.05,
+      "hmarl_mean": 0.2065,
+      "hmarl_std": 0.1319,
+      "baseline_mean": 0.7728,
+      "baseline_std": 0.241,
+      "n_hmarl": 4,
+      "n_baseline": 4,
+      "t_statistic": -4.1224,
+      "p_value_one_sided": 0.994667,
+      "significant": "False",
+      "interpretation": "FAIL \u2014 no significant difference"
+    },
+    "hmarl_vs_mappo": {
+      "baseline": "mappo",
+      "test": "One-sided t-test (HMARL > baseline)",
+      "alpha": 0.05,
+      "hmarl_mean": 0.2065,
+      "hmarl_std": 0.1319,
+      "baseline_mean": 0.9777,
+      "baseline_std": 0.0076,
+      "n_hmarl": 4,
+      "n_baseline": 4,
+      "t_statistic": -11.6725,
+      "p_value_one_sided": 0.999345,
+      "significant": "False",
+      "interpretation": "FAIL \u2014 no significant difference"
+    },
+    "hmarl_vs_random": {
+      "baseline": "random",
+      "test": "One-sided t-test (HMARL > baseline)",
+      "alpha": 0.05,
+      "hmarl_mean": 0.2065,
+      "hmarl_std": 0.1319,
+      "baseline_mean": 0.4632,
+      "baseline_std": 0.0006,
+      "n_hmarl": 4,
+      "n_baseline": 4,
+      "t_statistic": -3.8906,
+      "p_value_one_sided": 0.984946,
+      "significant": "False",
+      "interpretation": "FAIL \u2014 no significant difference"
+    }
+  },
+  "internal_consistency": {
+    "hmarl": {
+      "mean": 0.2065,
+      "std": 0.1319,
+      "cv_percent": 63.88,
+      "cv_threshold": 15.0,
+      "n_seeds": 4,
+      "consistent": false,
+      "interpretation": "FAIL \u2014 CV=63.9% \u2265 15.0%"
+    },
+    "ippo": {
+      "mean": 0.7728,
+      "std": 0.241,
+      "cv_percent": 31.18,
+      "cv_threshold": 15.0,
+      "n_seeds": 4,
+      "consistent": false,
+      "interpretation": "FAIL \u2014 CV=31.2% \u2265 15.0%"
+    },
+    "mappo": {
+      "mean": 0.9777,
+      "std": 0.0076,
+      "cv_percent": 0.77,
+      "cv_threshold": 15.0,
+      "n_seeds": 4,
+      "consistent": true,
+      "interpretation": "PASS \u2014 CV=0.8% < 15.0%"
+    },
+    "random": {
+      "mean": 0.4632,
+      "std": 0.0006,
+      "cv_percent": 0.12,
+      "cv_threshold": 15.0,
+      "n_seeds": 4,
+      "consistent": true,
+      "interpretation": "PASS \u2014 CV=0.1% < 15.0%"
+    }
+  },
+  "novelty_scatter": {
+    "rci_cat_vs_fai_mean": {
+      "pearson_r": -0.5292,
+      "p_value": 0.035046,
+      "n": 16,
+      "novelty": "MODERATE \u2014 partial overlap, RCI adds some unique info"
+    },
+    "rci_strict_vs_fai_mean": {
+      "pearson_r": 0.0143,
+      "p_value": 0.958056,
+      "n": 16,
+      "novelty": "HIGH \u2014 RCI captures distinct dimension from FAI"
+    },
+    "rci_nomove_vs_fai_mean": {
+      "pearson_r": 0.6357,
+      "p_value": 0.008129,
+      "n": 16,
+      "novelty": "MODERATE \u2014 partial overlap, RCI adds some unique info"
+    }
+  },
+  "meta": {
+    "script": "scripts/validate_rci.py",
+    "timestamp_utc": "2026-10-18T22:15:12.424735Z",
+    "device": {
+      "torch_device": "cpu",
+      "cuda_available": false,
+      "cuda_version": "10.2",
+      "gpu": null,
+      "cpu_count": 16,
+      "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-Ubuntu-18.04-bionic"
+    },
+    "versions": {
+      "python": "3.6.9",
+      "numpy": "1.18.1",
+      "torch": "1.10.2+cu102",
+      "stable_baselines3": "1.3.0",
+      "gym": "0.19.0"
+    },
+    "train_time_s": 0.02,
+    "algorithms": [
+      "hmarl",
+      "random"
+    ],
+    "loaded_from": "evaluation_results_multiseed/stat_test_results.json"
+  }
+}
