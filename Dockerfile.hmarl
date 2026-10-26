@@ -1,0 +1,31 @@
+ARG GRF_IMAGE=gfootball
+FROM ${GRF_IMAGE}
+
+# Bionic/py3.6 image (GRF docs recipe): add the RL stack the training runs used.
+# Pinned to the versions logged by dumps/*/training_log.json: torch 1.10.2+cu102,
+# sb3 1.3.0, gym 0.19.0.  hmarl itself is NOT installed here — the repo is bind
+# mounted at /gfootball and PYTHONPATH=/gfootball (see scripts/train_loop.sh).
+# NB: no -f download.pytorch.org/whl/torch_stable.html — that host is
+# unreachable from this network (stalls at 0 B/s) and pip timed out mid-download
+# of the 882 MB wheel.  The wheel is pre-fetched by scratch/dl_torch.sh (4
+# parallel range requests) and COPYed in; only the small deps still come from
+# the network.  The PyPI manylinux wheel IS the cu102 build (reports
+# 1.10.2+cu102), so logged version strings still match.
+# torchvision is deliberately absent from this from-scratch recipe: nothing in
+# this repo imports it, and its cp36/x86_64 wheel is not published on PyPI (only
+# aarch64).  NB the image that produced the archived logs (gfootball:hmarl,
+# 7aa17fec9498) does carry torchvision 0.11.3+cu102; the omission only affects
+# rebuilds, not any reported number.
+COPY wheels/torch-1.10.2-cp36-cp36m-manylinux1_x86_64.whl /tmp/wheels/
+# dataclasses first: torch declares it for python_version < 3.7, and --no-index
+# cannot resolve it from the local wheel dir.
+RUN python3 -m pip install --no-cache-dir --timeout 120 --retries 10 dataclasses \
+ && python3 -m pip install --no-cache-dir --timeout 120 --retries 10 \
+      --no-index --find-links /tmp/wheels torch==1.10.2 \
+ && rm -rf /tmp/wheels \
+ && python3 -m pip install --no-cache-dir --timeout 120 --retries 10 \
+      stable_baselines3==1.3.0 gym==0.19.0 \
+      mplsoccer scipy requests dataclasses matplotlib psutil \
+      opencv-python==4.5.5.64
+
+WORKDIR /gfootball

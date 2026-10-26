@@ -23,6 +23,6 @@ RUN python3 -m pip install opencv-python==4.5.5.64
 COPY . /gfootball
 RUN cd /gfootball && python3 -m pip install .
 
-RUN python3 -m pip install stable_baselines3==1.3.0 gym==0.21.0 torch==1.10.2 mplsoccer requests dataclasses matplotlib scipy
+RUN python3 -m pip install stable_baselines3==1.3.0 gym==0.19.0 torch==1.10.2 mplsoccer requests dataclasses matplotlib scipy
 
 WORKDIR /gfootball

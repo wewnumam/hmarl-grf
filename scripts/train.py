@@ -70,18 +70,18 @@ from hmarl.run_logging import (
 # ---------------------------------------------------------------------------
 LEARNING_RATE = 3e-4
 GAMMA = 1.0           # Song et al. (2024): gamma=1 most stable for 11v11
-GAE_LAMBDA = 0.99      # GAE lambda (0.95 → 0.99, 2026-10-15: 0.95^100 ≈ 0.006,
-                       # so credit from concede/terminal events (every ~330 steps)
-                       # died before reaching the decisions that caused them)
+GAE_LAMBDA = 0.95      # GAE lambda — thesis Table 9 (BAB IV: "GAE-λ = 0,95")
+                       # 2026-10-24: restored 0.99 -> 0.95.  The 3M run must match
+                       # the hyperparameter table written in BAB IV/V, and it
+                       # continues the lineage of the reported run (dumps/,
+                       # 11_vs_11_stochastic, GAE 0.95).  The 0.99 value belonged
+                       # to the obs10x ladder, which is archived, not reported.
 CLIP_RANGE = 0.2      # PPO clip range
-ENT_COEF = 0.03       # Entropy coefficient (c2)
-                      # 2026-10-18: 0.01 -> 0.03.  obs105 collapsed to a
-                      # near-deterministic policy (entropy 2.31 -> 0.53, min
-                      # 0.88; release_dir 27.8% of steps vs 8.6% before) once
-                      # the reward stopped moving — obs103/obs104 held ~2.4 at
-                      # 0.01, so the collapse came from the dead gradient, not
-                      # from this constant being wrong per se.  Raised anyway
-                      # as a guard while the new progression signal beds in.
+ENT_COEF = 0.01       # Entropy coefficient (c2) — thesis Table 9 ("c2 = 0,01")
+                      # 2026-10-24: restored 0.03 -> 0.01 for the same reason as
+                      # GAE_LAMBDA: naskah BAB IV/V states 0,01, and the reported
+                      # run used 0,01.  The 0.03 guard belonged to the archived
+                      # obs10x ladder only.
 VF_COEF = 0.5         # Value loss coefficient (c1)
 MINIBATCH_SIZE = 64
 NUM_EPOCHS = 4        # PPO epochs per update
