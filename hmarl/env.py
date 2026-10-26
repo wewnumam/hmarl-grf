@@ -1,6 +1,7 @@
 """Base GRF environment wrapper with state extraction for hierarchical MARL."""
 
 import atexit
+import os
 import types
 import weakref
 from typing import Any, Dict, List, Tuple
@@ -105,8 +106,18 @@ ACTION_CATEGORIES = {
 
 # Illegal actions per ball-ownership mode (Saltyfish, Kaggle Football 2020
 # 2nd place): masks away impossible moves to shrink the exploration space.
+# 2026-10-26: flag so the pre-fix mask stays reproducible — the reported 3M
+# and obs106 evaluations were run with the old mask (only action 16).
+# HMARL_MASK_RELEASE_NOOP=0 restores it.
+MASK_RELEASE_NOOP = os.environ.get('HMARL_MASK_RELEASE_NOOP', '1') == '1'
+
 _ILLEGAL_BY_OWNER = {
-    0: (16,),                          # we have the ball: no sliding
+    # 2026-10-26: 14/15/18 (release_direction/sprint/dribble) are no-op
+    # releases, not passes.  The 3M policy spent 68.9% of its actions on
+    # release_direction and the obs106 arm 99.1%, which is exactly the
+    # degenerate attractor this mask removes: with the ball at our feet the
+    # agent must now do something that moves the ball (pass/shot/dribble).
+    0: (14, 15, 16, 18) if MASK_RELEASE_NOOP else (16,),
     1: (9, 10, 11, 12, 17, 18),        # opponent has it: no pass/shot/dribble
     -1: (9, 10, 11, 12, 16, 17, 18),   # loose ball: those + sliding
 }

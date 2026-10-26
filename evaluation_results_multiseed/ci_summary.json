@@ -1,0 +1,124 @@
+{
+ "dir": "evaluation_results_multiseed",
+ "n_boot": 10000,
+ "metrics": {
+  "gd": {
+   "hmarl": {
+    "n": 4,
+    "mean": -90.75,
+    "sd": 37.88029390945464,
+    "median": -84.0,
+    "iqm": -84.0,
+    "ci95_boot_lo": -125.25,
+    "ci95_boot_hi": -63.0,
+    "iqm_ci95_boot_lo": -142.0,
+    "iqm_ci95_boot_hi": -53.0
+   },
+   "ippo": {
+    "n": 4,
+    "mean": -84.25,
+    "sd": 40.80339038200952,
+    "median": -92.0,
+    "iqm": -92.0,
+    "ci95_boot_lo": -115.5,
+    "ci95_boot_hi": -45.25,
+    "iqm_ci95_boot_lo": -125.0,
+    "iqm_ci95_boot_hi": -28.0
+   },
+   "mappo": {
+    "n": 4,
+    "mean": -95.25,
+    "sd": 20.966242709015205,
+    "median": -99.0,
+    "iqm": -99.0,
+    "ci95_boot_lo": -112.5,
+    "ci95_boot_hi": -78.0,
+    "iqm_ci95_boot_lo": -113.0,
+    "iqm_ci95_boot_hi": -70.0
+   },
+   "random": {
+    "n": 4,
+    "mean": -85.75,
+    "sd": 7.762087348130012,
+    "median": -84.5,
+    "iqm": -84.5,
+    "ci95_boot_lo": -92.5,
+    "ci95_boot_hi": -80.0,
+    "iqm_ci95_boot_lo": -96.0,
+    "iqm_ci95_boot_hi": -78.0
+   }
+  },
+  "reward": {
+   "hmarl": {
+    "n": 4,
+    "mean": -99.825,
+    "sd": 41.668323300400104,
+    "median": -92.4,
+    "iqm": -92.4,
+    "ci95_boot_lo": -137.77499999999998,
+    "ci95_boot_hi": -69.3,
+    "iqm_ci95_boot_lo": -156.2,
+    "iqm_ci95_boot_hi": -58.3
+   },
+   "ippo": {
+    "n": 4,
+    "mean": -92.675,
+    "sd": 44.88372942021047,
+    "median": -101.2,
+    "iqm": -101.2,
+    "ci95_boot_lo": -127.05,
+    "ci95_boot_hi": -49.775000000000006,
+    "iqm_ci95_boot_lo": -137.5,
+    "iqm_ci95_boot_hi": -30.8
+   },
+   "mappo": {
+    "n": 4,
+    "mean": -104.77499999999999,
+    "sd": 23.062866979916727,
+    "median": -108.9,
+    "iqm": -108.9,
+    "ci95_boot_lo": -123.75,
+    "ci95_boot_hi": -85.8,
+    "iqm_ci95_boot_lo": -124.3,
+    "iqm_ci95_boot_hi": -77.0
+   },
+   "random": {
+    "n": 4,
+    "mean": -94.32499999999999,
+    "sd": 8.538296082943011,
+    "median": -92.95,
+    "iqm": -92.95,
+    "ci95_boot_lo": -101.75,
+    "ci95_boot_hi": -88.0,
+    "iqm_ci95_boot_lo": -105.6,
+    "iqm_ci95_boot_hi": -85.8
+   }
+  }
+ },
+ "p_improvement": {
+  "hmarl": {
+   "hmarl": 0.4756,
+   "ippo": 0.4148,
+   "mappo": 0.5961,
+   "random": 0.4019
+  },
+  "ippo": {
+   "hmarl": 0.5888,
+   "ippo": 0.4815,
+   "mappo": 0.6983,
+   "random": 0.5172
+  },
+  "mappo": {
+   "hmarl": 0.3945,
+   "ippo": 0.2928,
+   "mappo": 0.4779,
+   "random": 0.1644
+  },
+  "random": {
+   "hmarl": 0.5949,
+   "ippo": 0.4814,
+   "mappo": 0.8234,
+   "random": 0.4636
+  }
+ }
+}

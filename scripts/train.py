@@ -77,11 +77,14 @@ GAE_LAMBDA = 0.95      # GAE lambda — thesis Table 9 (BAB IV: "GAE-λ = 0,95")
                        # 11_vs_11_stochastic, GAE 0.95).  The 0.99 value belonged
                        # to the obs10x ladder, which is archived, not reported.
 CLIP_RANGE = 0.2      # PPO clip range
-ENT_COEF = 0.01       # Entropy coefficient (c2) — thesis Table 9 ("c2 = 0,01")
-                      # 2026-10-24: restored 0.03 -> 0.01 for the same reason as
-                      # GAE_LAMBDA: naskah BAB IV/V states 0,01, and the reported
-                      # run used 0,01.  The 0.03 guard belonged to the archived
-                      # obs10x ladder only.
+ENT_COEF = 0.03       # 2026-10-26: raised 0.01 -> 0.03 for the post-3M fix run.
+                      # Evidence that 0.01 was too weak: entropy fell 2.45->1.94
+                      # (min 0.49) across the 3M run and the obs106 arm collapsed
+                      # onto one action (99.1% action 14); the 3M policy also
+                      # spent 68.9% of its actions on release_direction.
+                      # History: 0.03 was the archived obs10x-ladder value, cut to
+                      # 0.01 (2026-10-24) so the reported 3M run matched Table 9;
+                      # Table 9 is patched to 0,03 for the fix run.
 VF_COEF = 0.5         # Value loss coefficient (c1)
 MINIBATCH_SIZE = 64
 NUM_EPOCHS = 4        # PPO epochs per update
@@ -635,11 +638,24 @@ class HMARLTrainer:
 
         total_pg_loss = 0.0
         total_v_loss = 0.0
+        total_v_loss_norm = 0.0
         total_entropy = 0.0
         kl_accum = 0.0
         clipfrac_accum = 0.0
         adv_sum, adv_sumsq, adv_n = 0.0, 0.0, 0
         num_updates = 0
+
+        # 2026-10-26: the critic dominated the joint loss.  Median
+        # vf_coef*value_loss was 0.053 against a policy_loss of 0.0016 (33x)
+        # because raw returns are O(1e2) while the advantages are already
+        # unit-normalised; with grad-norm clipping at 0.5 applied to the
+        # COMBINED loss, the value term then rescaled/rotated the policy
+        # gradient.  Dividing prediction and target by one detached scale per
+        # update makes the value gradient O(1) and leaves the minimiser
+        # unchanged (MSE(v/s, r/s) == MSE(v, r)/s^2).  The raw value loss is
+        # still logged, so runs remain comparable.
+        ret_std = float(np.std(self.buffer.returns)) if self.buffer.returns else 1.0
+        v_scale = max(ret_std, 1e-3)
 
         for epoch in range(NUM_EPOCHS):
             for batch in self.buffer.get_batches(MINIBATCH_SIZE):
@@ -674,8 +690,9 @@ class HMARLTrainer:
                 kl_accum += float((new_log_probs - old_log_probs).mean())
                 clipfrac_accum += float(((ratio - 1.0).abs() > CLIP_RANGE).float().mean())
 
-                # Value loss
-                value_loss = nn.MSELoss()(new_values, returns)
+                # Value loss (prediction and target share v_scale, see above)
+                value_loss_raw = nn.MSELoss()(new_values, returns)
+                value_loss = nn.MSELoss()(new_values / v_scale, returns / v_scale)
 
                 # Entropy bonus
                 entropy_loss = -entropy.mean()
@@ -693,7 +710,8 @@ class HMARLTrainer:
                 self.optimizer.step()
 
                 total_pg_loss += policy_loss.item()
-                total_v_loss += value_loss.item()
+                total_v_loss += value_loss_raw.item()
+                total_v_loss_norm += value_loss.item()
                 total_entropy += -entropy_loss.item()
                 num_updates += 1
 
@@ -712,6 +730,8 @@ class HMARLTrainer:
             diagnostics = {
                 'update_policy_loss': total_pg_loss / num_updates,
                 'update_value_loss': total_v_loss / num_updates,
+                'update_value_loss_norm': total_v_loss_norm / num_updates,
+                'update_value_scale': v_scale,
                 'update_entropy': total_entropy / num_updates,
                 'update_approx_kl': kl_accum / num_updates,
                 'update_clipfrac': clipfrac_accum / num_updates,
@@ -762,6 +782,9 @@ class HMARLTrainer:
             'update_approx_kl': [],
             'update_clipfrac': [],
             'update_adv_std': [],
+            # 2026-10-26: value-loss rescaling diagnostics (see _ppo_update)
+            'update_value_loss_norm': [],
+            'update_value_scale': [],
         }
 
     def _append_training_log(self, stats: Dict):
