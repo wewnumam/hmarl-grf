@@ -49,7 +49,10 @@ from hmarl.policy import (
     HierarchicalController, SUBGOALS, NUM_SUBGOALS,
 )
 from hmarl.expert import ExpertPolicyAllAgents, ExpertPolicyEval
-from hmarl.rci import compute_rci_category, compute_rci_strict, compute_rci_nomove
+from hmarl.rci import (
+    compute_rci_category, compute_rci_strict, compute_rci_nomove,
+    f_strict, f_category, f_category_nomove,
+)
 from hmarl.utils import (
     OBS_DIM, EPISODE_MAX_STEPS, extract_obs_vector, load_hmarl_checkpoint,
 )
@@ -69,6 +72,52 @@ def jsd_log2(p, q, eps=1e-12):
     kl_pm = float(np.sum(p * (np.log2(p) - np.log2(m))))
     kl_qm = float(np.sum(q * (np.log2(q) - np.log2(m))))
     return max(0.0, 0.5 * kl_pm + 0.5 * kl_qm)
+
+
+INVOLVE_RADIUS = 3.0
+
+
+def involvement(game_state, radius=INVOLVE_RADIUS):
+    """Which left-team agents actually take part in the ball at this step?
+
+    Motivation: RCI_cat credits any category match, including
+    movement-vs-movement, so a passively standing agent still earns credit.
+    That is the confound flagged by the rci_nomove variant. Gating by ball
+    involvement isolates the steps where role behaviour is observable.
+
+    Returns (own, near, in_radius) — three boolean lists of NUM_AGENTS:
+      own       : agent currently owns the ball (team 0)
+      near      : agent nearest to the ball
+      in_radius : agent within `radius` units of the ball
+    """
+    ball = game_state.get('ball', [0.0, 0.0, 0.0])
+    bx, by = float(ball[0]), float(ball[1])
+    pos = game_state.get('left_team', [])[:NUM_AGENTS]
+    owned_team = int(round(float(game_state.get('ball_owned_team', -1))))
+    owned_player = int(round(float(game_state.get('ball_owned_player', -1))))
+
+    own = [False] * NUM_AGENTS
+    if owned_team == 0 and 0 <= owned_player < NUM_AGENTS:
+        own[owned_player] = True
+
+    dist = [float(np.hypot(float(p[0]) - bx, float(p[1]) - by)) for p in pos]
+    near = [False] * NUM_AGENTS
+    if dist:
+        near[int(np.argmin(dist))] = True
+    in_radius = [(d <= radius) for d in dist] + [False] * (NUM_AGENTS - len(dist))
+    return own, near, in_radius[:NUM_AGENTS]
+
+
+def gated_rci(acts, ideals, gates, f_match):
+    """RCI restricted to (agent, step) pairs where the gate is True."""
+    num = den = 0.0
+    for t, (a, ideal) in enumerate(zip(acts, ideals)):
+        g = gates[t] if t < len(gates) else None
+        for i in range(NUM_AGENTS):
+            if g is not None and g[i]:
+                num += f_match(int(a[i]), int(ideal[i]))
+                den += 1.0
+    return (num / den) if den else 0.0, den
 
 
 def softmax_masked(logits, mask):
@@ -106,6 +155,7 @@ def main():
     acc = {c: {'jsd': [], 'flip': 0, 'flip_decided': 0, 'n': 0, 'ndec': 0,
                'pmax': [], 'gap': [], 'acts': [], 'ideals': []}
            for c in ['actual'] + conditions}
+    acc['actual'].update({'own': [], 'near': [], 'rad': []})
     role_jsd = {c: {} for c in conditions}
     steps_total = 0
     t0 = time.time()
@@ -189,6 +239,11 @@ def main():
                 acc[c]['acts'].append([int(np.argmax(probs[c][i])) for i in range(NUM_AGENTS)])
                 acc[c]['ideals'].append([int(a) for a in ideal_actions])
 
+            own_g, near_g, rad_g = involvement(game_state)
+            acc['actual']['own'].append(own_g)
+            acc['actual']['near'].append(near_g)
+            acc['actual']['rad'].append(rad_g)
+
             joint = [int(np.argmax(probs['actual'][i])) for i in range(NUM_AGENTS)]
             step_result = env.step(joint)
             if len(step_result) == 5:
@@ -208,11 +263,28 @@ def main():
     # RCI replay per condition
     summary = {'ckpt': args.ckpt, 'episodes': args.episodes, 'steps': steps_total,
                'num_subgoals': NUM_SUBGOALS, 'conditions': {}}
+
+    gates = {'own': acc['actual']['own'], 'near': acc['actual']['near'],
+             'rad': acc['actual']['rad']}
+    summary['involvement'] = {
+        'radius': INVOLVE_RADIUS,
+        'owner_share': float(np.mean([np.mean(g) for g in gates['own']])) if gates['own'] else 0.0,
+        'in_radius_share': float(np.mean([np.mean(g) for g in gates['rad']])) if gates['rad'] else 0.0,
+        'steps_with_any_owner': float(np.mean([any(g) for g in gates['own']])) if gates['own'] else 0.0,
+    }
+
     for c in ['actual'] + conditions:
         acts, ideals = acc[c]['acts'], acc[c]['ideals']
         rci_cat, _ = compute_rci_category(acts, ideals)
         rci_strict, _ = compute_rci_strict(acts, ideals)
         rci_nomove, _ = compute_rci_nomove(acts, ideals)
+        gated = {}
+        for gname, gate in gates.items():
+            for fname, fn in (('cat', f_category), ('strict', f_strict),
+                              ('nomove', f_category_nomove)):
+                val, den = gated_rci(acts, ideals, gate, fn)
+                gated['%s_%s' % (gname, fname)] = val
+                gated['%s_%s_n' % (gname, fname)] = den
         summary['conditions'][c] = {
             'jsd_mean': float(np.mean(acc[c]['jsd'])) if acc[c]['jsd'] else 0.0,
             'jsd_p95': float(np.percentile(acc[c]['jsd'], 95)) if acc[c]['jsd'] else 0.0,
@@ -223,6 +295,7 @@ def main():
             'pmax_mean': float(np.mean(acc[c]['pmax'])) if acc[c]['pmax'] else 0.0,
             'top2_gap_mean': float(np.mean(acc[c]['gap'])) if acc[c]['gap'] else 0.0,
             'rci_cat': rci_cat, 'rci_strict': rci_strict, 'rci_nomove': rci_nomove,
+            'gated': gated,
         }
         if c in role_jsd:
             summary['conditions'][c]['jsd_by_role'] = {
@@ -245,6 +318,18 @@ def main():
         if br:
             print('  %-9s %s' % (c, '  '.join('%s %.5f' % (r, v) for r, v in br.items())))
 
+    inv = summary['involvement']
+    print('\ninvolvement (radius %.1f): owner_share %.3f | in_radius_share %.3f | steps_with_owner %.1f%%'
+          % (inv['radius'], inv['owner_share'], inv['in_radius_share'],
+             100.0 * inv['steps_with_any_owner']))
+    for gname, label in (('near', 'nearest-to-ball'), ('rad', 'in-radius'), ('own', 'ball-owner')):
+        print('\nRCI gated by %s (share of ungated -> gated):' % label)
+        print('%-9s %10s %10s %10s' % ('condition', 'cat', 'strict', 'nomove'))
+        for c in ['actual'] + conditions:
+            g = summary['conditions'][c]['gated']
+            print('%-9s %10.4f %10.4f %10.4f' % (
+                c, g['%s_cat' % gname], g['%s_strict' % gname], g['%s_nomove' % gname]))
+
     print('\nreference: pre-SUBGOAL_SCALE=3.0 measurement was JSD 4e-5..4e-4, '
           'flip 2.5-4.3%% (obs103 checkpoint)')
 
@@ -254,6 +339,18 @@ def main():
     with open(out, 'w') as fh:
         json.dump(summary, fh, indent=1)
     print('\nwrote %s' % out)
+
+    # Gate masks for offline recomputation of any future RCI variant (no re-run needed)
+    npz = os.path.join(os.path.dirname(out) or '.', 'involve_%s.npz' % os.path.basename(
+        os.path.dirname(args.ckpt) or 'ckpt'))
+    np.savez_compressed(
+        npz,
+        own=np.packbits(np.array(acc['actual']['own'], dtype=np.uint8).ravel()),
+        near=np.packbits(np.array(acc['actual']['near'], dtype=np.uint8).ravel()),
+        rad=np.packbits(np.array(acc['actual']['rad'], dtype=np.uint8).ravel()),
+        shape=np.array(acc['actual']['own']).shape,
+    )
+    print('wrote %s' % npz)
 
 
 if __name__ == '__main__':
